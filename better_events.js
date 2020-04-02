@@ -1,15 +1,14 @@
 //simpleSourceMap=/my_modules/better_events.js
 //simpleSourceMap2=/lib/better_events.js
-'use strict';
-/*
-* @module BetterEvents
-*
-* @no_dependency
-*
-* This file can be required by node or loaded in browser
-*
-*/
 ;'use strict';
+/**
+ * @module BetterEvents
+ * @author x7dude
+ * @license MIT
+ * @description Advanced event emitter for NodeJS and browsers. 
+ *
+ * This file can be 'required' or loaded directly in browser with <script src="/path/to/better_events.js">
+ */
 (function(globalObj){
     
     //NOTE: this will not identify script as run in browser if we pass it to browserify first.... 
