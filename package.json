@@ -1,0 +1,11 @@
+{
+  "name": "BetterEvents",
+  "version": "1.0.0",
+  "description": "An advanced event emitter for NodeJS and browers",
+  "main": "better_events.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "author": "x7dude",
+  "license": "MIT"
+}
