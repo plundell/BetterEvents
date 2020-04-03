@@ -1,5 +1,5 @@
 {
-  "name": "BetterEvents",
+  "name": "evenbetterevents",
   "version": "1.0.0",
   "description": "An advanced event emitter for NodeJS and browers",
   "main": "better_events.js",
@@ -7,5 +7,10 @@
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "author": "plundell",
-  "license": "MIT"
+  "license": "MIT",
+  "homepage": "https://github.com/plundell/betterevents",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/plundell/betterevents.git"
+  }
 }
