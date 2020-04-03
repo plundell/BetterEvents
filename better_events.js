@@ -3,7 +3,8 @@
 ;'use strict';
 /**
  * @module BetterEvents
- * @author x7dude
+ * @author plundell 
+ * @email qmusicplayer@protonmail.com
  * @license MIT
  * @description Advanced event emitter for NodeJS and browsers. 
  *
