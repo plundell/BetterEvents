@@ -12,13 +12,16 @@
  */
 (function(globalObj){
     
-    //NOTE: this will not identify script as run in browser if we pass it to browserify first.... 
-    if (typeof module === 'object' && module.exports){
-        module.exports = function exportBetterEvents(){return BetterEvents};
-    }else {
-        globalObj.BetterEvents=BetterEvents;
+    //Export from module if available
+    if(typeof module === 'object' && module.exports){
+        module.exports = BetterEvents;
     }
 
+    //Set on window if available
+    if(typeof window === 'object'){
+        window.BetterEvents=BetterEvents;
+    }
+    
 
 
     const defaultOptions={
