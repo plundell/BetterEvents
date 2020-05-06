@@ -24,7 +24,7 @@
     
 
 
-    const defaultOptions={
+    BetterEvents.defaultOptions={
         bufferDelay:1000
         ,groupTimeout:0 
         ,defaultIndex:0
@@ -129,7 +129,7 @@
 
     function parseOptions(a,b){
         var dirty=Object.assign({},a,b);
-        var parsed=Object.assign({},defaultOptions);
+        var parsed=Object.assign({},BetterEvents.defaultOptions);
         
         if(dirty.bufferDelay){
             if(typeof dirty.bufferDelay=='number')
