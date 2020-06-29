@@ -29,6 +29,7 @@
     BetterEvents.defaultOptions={
         bufferDelay:1000
         ,groupTimeout:0 
+        ,groupDelay:0 //the amount of time to wait before executing the next group (which can allow things to propogate if need be)
         ,defaultIndex:0
         ,onProgress:()=>{}
         ,runAs:'this'       //Available: this, global, empty=>an empty object,shared=>a shared new object, status=>the object returned by emitEvent
@@ -36,10 +37,14 @@
     }
 
     function BetterEvents(options={}){
-        
+
         //Make sure we've been new'ed
-        if(!this instanceof BetterEvents)
-            throw new Error("BetterEvents() should be new'ed or called as object which inherits from BetterEvents");
+        if(!this instanceof BetterEvents || typeof this.removeAllListeners !='function'){
+            console.error("EINVALID. 'this' in BetterEvents constructor:",this);
+            console.error("EINVALID. 'this.removeAllListeners' in BetterEvents constructor:",this.removeAllListeners);
+            throw new Error("BetterEvents() should be new'ed or called as object which inherits from BetterEvents. "
+                +"See last console.error.");
+        }
 
 
         Object.defineProperty(this,'_betterEvents',{value:{
@@ -54,7 +59,6 @@
             ,running:{}
         }});
         
-
         this.removeAllListeners(); //resets/sets default values of additional properties on this._betterEvents
     }
 
@@ -66,7 +70,7 @@
 
 
     /*
-    * Removes all listeners for all events
+    * Removes all listeners for all events (ie. reset this emitter)
     * @return this
     */
     BetterEvents.prototype.removeAllListeners = function(){
@@ -98,9 +102,11 @@
             var str=value.toString();
             if(str.length>50)
                 str=str.slice(0,25)+'...'+str.slice(-25)
+
             var type=typeof value;
             if(type=='object')
                 type=value.__proto__.constructor.name
+
             return `(${type})${str}`
         }
     }
@@ -130,32 +136,34 @@
     }
 
 
-
-    function parseOptions(a,b){
-        var dirty=Object.assign({},a,b);
+    /*
+    * Parse options passed to a new instance, only keeping those we expected and only throwing if those are
+    * the wrong type
+    *
+    * @param object dirty   dirty options
+    * @opt object onetime   one time options
+    *
+    * @throws TypeError
+    *
+    * @return object        Object of parsed options
+    */
+    function parseOptions(dirty,onetime){
+        dirty=Object.assign({},dirty,onetime);
         var parsed=Object.assign({},BetterEvents.defaultOptions);
-        
-        if(dirty.bufferDelay){
-            if(typeof dirty.bufferDelay=='number')
-                parsed.bufferDelay=dirty.bufferDelay;
-            else
-                throw new TypeError("Option 'bufferDelay' should be a number, got:"+typeString(dirty.bufferDelay))
+    
+        var parse=function parse(key,type){
+            if(dirty.hasOwnProperty(key)){
+                if(typeof dirty[key]==type)
+                    parsed[key]=dirty[key];
+                else
+                    throw new TypeError(`Option '${key}' should be a ${type}, got: ${typeString(dirty[key])}`)
+            }
         }
+        parse('bufferDelay','number');
+        parse('groupTimeout','number');
+        parse('groupDelay','number');
+        parse('onProgress','function');
 
-        if(dirty.groupTimeout){
-            if(typeof dirty.groupTimeout=='number')
-                parsed.groupTimeout=dirty.groupTimeout;
-            else
-                throw new TypeError("Option 'groupTimeout' should be a number, got:"+typeString(dirty.groupTimeout))
-        }
-
-
-        if(dirty.onProgress){
-            if(typeof dirty.onProgress=='function')
-                parsed.onProgress=dirty.onProgress;
-            else
-                throw new TypeError("Option 'onProgress' should be a function, got:"+typeString(dirty.onProgress))
-        }
 
         if(dirty.exclude){
             if(typeof dirty.exclude=='function')
@@ -185,7 +193,7 @@
     * @constructor Listener     These are the objects waiting for events to be emitted
     *
     * @param array args             Array of args
-    *   @param string|<RegExp> evt    Reserved values are 'once' and only '-' or '+'
+    *   @param string|<RegExp> evt    
     *   @param function listener      Method to be called when the event is emitted. If the method returns 'off' on
     *                                   any call then it will be removed after that call
     *   @opt boolean|string once      Boolean or string 'once'. The listener will be removed after the first time it's called.  
@@ -197,10 +205,25 @@
     */
     function Listener(args, emitter){
         var _b=emitter._betterEvents
+
+        Object.defineProperties(this,{
+            //For legacy we keep the single character props as getters
+            i:{get:()=>this.index,set:(val)=>this.index=val}
+            ,o:{get:()=>this.once,set:(val)=>this.once=val}
+            ,l:{get:()=>this.callback,set:(val)=>this.callback=val}
+            ,e:{get:()=>this.evt,set:(val)=>this.evt=val}
+            ,n:{get:()=>this.runs,set:(val)=>this.runs=val}
+            
+            //Some synomyms for ease
+            ,listener:{get:()=>this.callback,set:(val)=>this.callback=val}
+            ,event:{get:()=>this.evt,set:(val)=>this.evt=val}
+        })
+
+
         
-        this.o=false;
-        this.i=_b.options.defaultIndex
-        this.n=0;
+        this.once=false;
+        this.index=_b.options.defaultIndex
+        this.runs=0;
 
         //First just assign without checking....
         if(args.length==1 && args[0] && typeof args[0]=='object'){
@@ -210,45 +233,47 @@
         }else{ 
 
             //Allow args in any order
-            args.forEach((arg,index)=>{switch(typeof arg){
-                case 'function':this.l=arg; break; //listener
-                case 'boolean':this.o=arg; break; //once
-                case 'number':this.i=arg; break; //index to run
+            args.forEach((arg,i)=>{switch(typeof arg){
+                case 'function':this.callback=arg; break; //listener
+                case 'boolean':this.once=arg; break; //once
+                case 'number':this.index=arg; break; //index to run
                 case 'string': 
-                    if(arg.match(/^\++$/)){
-                        this.i=_b.options.defaultIndex+arg.length; //increment index up
-                    }else if(arg.match(/^\-+$/)){
-                        this.i=_b.options.defaultIndex-arg.length; //increment index down
-                    }else if(arg=='once'){
-                        this.o=true;
+                    if(arg.match(/^\++$/)&&this.index==_b.options.defaultIndex){ //first match => change index, second match =>fall through to this.evt='+'
+                        this.index=_b.options.defaultIndex+arg.length; //increment index up
+                    }else if(arg.match(/^\-+$/)&&this.index==_b.options.defaultIndex){ //first match => change index, second match =>fall through to this.evt='-'
+                        this.index=_b.options.defaultIndex-arg.length; //increment index down
+                    }else if(arg=='once' && this.once==false){
+                        this.once=true;
+                    }else if(!this.evt){
+                        this.evt=arg; //event name
                     }else{
-                        this.e=arg; //event name
+                        throw new Error(`EINVAL. Too many string args passed. Failed on arg #${i} of: ${JSON.stringify(args)}`);
                     }
                     break;
                 case 'object':
                     if(arg instanceof RegExp)
-                        this.e=arg
+                        this.evt=arg
                     else
-                        throw new Error(`EINVAL. Unexpected object arg #${index}. Only event <RegExp> or single object matching return of this method allowed: `
+                        throw new Error(`EINVAL. Unexpected object arg #${i}. Only event <RegExp> or single object matching return of this method allowed: `
                             +JSON.stringify(this));
             }})
         }
 
         //Then check...
-        if(typeof this.l!='function')
+        if(typeof this.callback!='function')
             throw new TypeError("No listener function passed, got: "+JSON.stringify(this));
-        if(typeof this.e!='string' &&  !(this.e instanceof RegExp))
+        if(typeof this.evt!='string' &&  !(this.evt instanceof RegExp))
             throw new TypeError("No event string or RegExp was passed, got: "+JSON.stringify(this));
 
         //Finally, add a method that can always be used to remove this listener from this object...
-        this.remove=emitter.removeListener.bind(emitter,this.l,this.e);
+        this.remove=emitter.removeListener.bind(emitter,this.callback,this.evt);
 
         //...and one that can be used to add a timeout that fires if the event hasn't fired within that timespan
         this.timeout=(callback,timeout,cancelOnTimeout)=>{
-            let n0=this.n; //run times when timeout is registered...
+            let n0=this.runs; //run times when timeout is registered...
             return setTimeout(()=>{
                 //...compared to run times on timeout
-                if(this.n==n0){
+                if(this.runs==n0){
                     if(cancelOnTimeout)
                         this.remove();
                     callback.call(emitter,obj);
@@ -275,8 +300,8 @@
         var listener=new Listener(args,this);
 
         //Add it to the appropriate place        
-        if(typeof listener.e=='string'){
-            (this._betterEvents.events[listener.e]||(this._betterEvents.events[listener.e]=[])).push(listener);
+        if(typeof listener.evt=='string'){
+            (this._betterEvents.events[listener.evt]||(this._betterEvents.events[listener.evt]=[])).push(listener);
         }else{
            this._betterEvents.regexp.push(listener);
         }
@@ -588,7 +613,7 @@
             //...+ get listeners that have been registered with a regex to match this event 
             //and more, eg. /shutdown_.*/
             this._betterEvents.regexp.forEach(listener=>{
-                if(evt.match(listener.e))
+                if(evt.match(listenerevt))
                     listeners.push(listener);
             })
         }else if(evt instanceof RegExp){
@@ -657,19 +682,21 @@
     /*
     * Check if a specific callback listener is registered for an event
     * 
-    * @param string|<RegExp>|<Listener> evt 
+    * @param string|<RegExp>|<Listener> evtOrListner 
     * @param function callback
     *
     * @throw TypeError
     * @return bool            
     */
-    BetterEvents.prototype.hasListener = function hasListener(evt,callback) {
-        if(evt && evt.e){
-            evt=evt.e;
-            callback=evt.l;
+    BetterEvents.prototype.hasListener = function hasListener(evtOrListner,callback) {
+        if(evtOrListner && evtOrListner.evt){
+            var evt=evtOrListner.evt;
+            callback=evtOrListner.listener;
+        }else{
+            evt=evtOrListner;
         }
 
-        return this.getListeners(evt,true).find(listener=>listener.l==callback) ? true : false;
+        return this.getListeners(evt,true).find(listener=>listener.callback==callback) ? true : false;
     }
 
 
@@ -715,8 +742,8 @@
     * Removes a single registered evt-listener combo. Ie. if regexp is used, only a registered
     * regexp will be removed, not every event matching that regexp
     *
-    * @param object|function listener   A listener function, or an object with props e and l
-    * @param @opt string|<RegExp> evt
+    * @param object|function      listener   A listener function, or an object with props e and l
+    * @param @opt string|<RegExp> evt        Optional only if $listener is an object with .e (which is the event).
     *
     * @throws TypeError
     * @throws Error     If the listener doesn't exist
@@ -730,9 +757,10 @@
                 // console.log('non-standard listener:',arguments)
                 return undefined //ie. a non-standard listener, not stored on .events or .regexp
             }
-
             evt=listener.e
             listener=listener.l
+        }else if(typeof listener!='function'){
+            throw new TypeError(errString(i,'listener',listener));
         }
 
         var arr;
@@ -740,7 +768,7 @@
             if(this._betterEvents.events[evt] instanceof Array)
                 arr=this._betterEvents.events[evt]
             else
-                throw new Error("No such event: "+evt);
+                throw new Error("No listeners registered for event: "+evt);
         else if(evt instanceof RegExp)
             arr=this._betterEvents.regexp;
         else
@@ -752,8 +780,12 @@
             // console.log("Removing ", arr[i])
             return (arr.splice(i,1))[0];
         }
-        else
-            throw new Error("No such listener: "+typeString(listener));
+        else{
+            let lines=String(listener).split('\n');
+            if(lines.length>8)
+                lines=lines.slice(0,4).concat('...'+String(lines.length-8)+' lines ...',lines.slice(-4))
+            throw new Error(`No such listener for event '${evt}': \n${lines.join('\n')}`);
+        }
 
 
     }
@@ -1088,7 +1120,7 @@ if(evt=='settings') console.log('_getGroupedListeners exclude:',exclude)
                 options.emitAs=this; break;
         }
         // console.log('EMITTING:',evt)
-        //Make sure we have an array. This also copies delinks it from the passed in array
+        //Make sure we have an array. This also delinks it from the passed in array BUT IT DOES NOT delink the individual args
         args=[].concat(args);
 
         //Allow possibility to intercept an event...
@@ -1125,7 +1157,7 @@ if(evt=='settings') console.log('_getGroupedListeners exclude:',exclude)
 
                                 //First check if this is a a one-time listener (do this before calling in case
                                 //the callback emits the event again). NOTE: This will have no effect
-                                if(listener.o === true)
+                                if(listener.once === true)
                                     self.removeListener(listener);
 
                                 //For all listeners that don't have an 'exact match' string event, add
@@ -1168,6 +1200,10 @@ if(evt=='settings') console.log('_getGroupedListeners exclude:',exclude)
                         }else{
                             await groupedPromises;
                         }
+
+                        //If we're delaying between groups...
+                        if(_b.options.groupDelay && status.groups.length>1 && i!=last)
+                            await new Promise((wakeup)=>{setTimeout(wakeup,_b.options.groupDelay)})
                     }
                 
                 }catch(err){
