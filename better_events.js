@@ -613,7 +613,7 @@
             //...+ get listeners that have been registered with a regex to match this event 
             //and more, eg. /shutdown_.*/
             this._betterEvents.regexp.forEach(listener=>{
-                if(evt.match(listenerevt))
+                if(evt.match(listener.evt))
                     listeners.push(listener);
             })
         }else if(evt instanceof RegExp){
