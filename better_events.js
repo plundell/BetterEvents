@@ -276,7 +276,7 @@
                 if(this.runs==n0){
                     if(cancelOnTimeout)
                         this.remove();
-                    callback.call(emitter,obj);
+                    callback.call(emitter);
                 }
             },timeout);
         }
@@ -292,8 +292,7 @@
     *
     *
     * @throw TypeError
-    * @return object        {e,o,l,i,n,remove,timeout}     event name, once, listener func, index to run, run times, 
-    *                                                       remove listener, add timeout
+    * @return <Listener>        
     */
     BetterEvents.prototype.addListener=function(...args) {
         //Create the <Listener>
@@ -311,7 +310,7 @@
 
     /*
     * @shortcut addListener(,,false)   
-    * @return object        {e,o,l,i}
+    * @return <Listener>       
     */
     BetterEvents.prototype.on=function(evt,listener){
         return this.addListener(evt,listener,false);
@@ -319,7 +318,7 @@
 
     /*
     * @shortcut addListener(,,true)
-    * @return object        {e,o,l,i}
+    * @return <Listener>      
     */
     BetterEvents.prototype.once=function(evt,listener){
         return this.addListener(evt,listener,true);
