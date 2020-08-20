@@ -496,6 +496,26 @@
         return listener;
     }
 
+
+    /*
+    * Like after() but this returns a promise which resolves when callback would have fired first time
+    *
+    * @param string|<RegExp> evt    @see addListener()
+    * @opt number index             @see addListener(). NOTE: will not be respected for previously emitted event
+    *                                 
+    * @return Promise(mixed,<TypeError>)  Resolves with event payload, rejecets if $evt is bad type
+    */
+    BetterEvents.prototype.afterPromise=function afterPromise(evt,index){
+        return new Promise((resolve,reject)=>{
+            try{
+                this.after(evt,(...args)=>resolve(args),true,index);
+            }catch(err){
+                reject(err);
+            }
+        })
+    }
+
+
     /*
     * Create an event that fires once after a list of other events. 
     *
