@@ -11,7 +11,7 @@
  * This file can be 'required' or loaded directly in browser with <script src="/path/to/better_events.js">
  */
 (function(globalObj){
-    
+    var firstLine=new Error("First line marker")
     //Export from module if available
     if(typeof module === 'object' && module.exports){
         module.exports = BetterEvents;
@@ -21,22 +21,60 @@
     if(typeof window === 'object'){
         window.BetterEvents=BetterEvents;
     }
+
+    if(typeof process=='object' && typeof process.env=='object' && typeof process.env.NODE_ENV=='string'){
+        var ENV=process.env.NODE_ENV;
+    }
     
    
+    /*
+    * Verbose logger that respects possible devmode
+    */
+    function logdebug(...args){
+        if(ENV=='development'){
+            ((this?(this.log||this._log):undefined)||console).debug(...args)
+        }
+    }
+    function logwarn(...args){
+        ((this?(this.log||this._log):undefined)||console).warn(...args)
+    }
+    /*
+    * Error logger
+    */
+    function logerror(...args){
+        ((this?(this.log||this._log):undefined)||console).error(...args)
+    }
 
+
+    /*
+    * Error handler that won't fail
+    */
+    function handleEmitError(...args){
+        try{
+            if(this && typeof this.onerror=='function')
+                this.onerror(...args);
+            else
+                logerror.call(this,...args);
+        }catch(err){
+            console.error('BUGBUG. Bad error handler in BetterEvents instance.',err);
+        }
+    }
 
 
     BetterEvents.defaultOptions={
-        bufferDelay:1000
-        ,groupTimeout:0 
+        groupTimeout:0 
         ,groupDelay:0 //the amount of time to wait before executing the next group (which can allow things to propogate if need be)
         ,defaultIndex:0
         ,onProgress:()=>{}
         ,runAs:'this'       //Available: this, global, empty=>an empty object,shared=>a shared new object, status=>the object returned by emitEvent
-        ,duplicate:false
+        ,duplicate:false   //true=>allow the same listener to be added multiple times. default false
+        ,returnStatus:true //Default true => emitEvent() will return an object (@see _getStatusObj()), else a promise
     }
 
+    BetterEvents.Listener=Listener;
+
     function BetterEvents(options={}){
+
 
         //Make sure we've been new'ed
         if(!this instanceof BetterEvents || typeof this.removeAllListeners !='function'){
@@ -46,18 +84,23 @@
                 +"See last console.error.");
         }
 
-
+        if(globalObj.BetterLog){
+            firstLine=globalObj.BetterLog.prepareInFileMarker(firstLine);
+            lastLine=globalObj.BetterLog.prepareInFileMarker(lastLine);
+        }
         Object.defineProperty(this,'_betterEvents',{value:{
             emitted:{}
             ,after:{}
-            ,buffer:{}
+            ,bufferEvt:{}
+            ,buffer:[]
             ,intercept:{}
             ,options:parseOptions(options)
-            ,onerror:typeof options.onerror=='function'
-                ?options.onerror
-                :BetterEvents.prototype._defaultEmitErrorHandler
             ,running:{}
         }});
+
+        //Set a possible error handler directly on this (but non-enum)
+        if(this._betterEvents.options.onerror)
+            Object.defineProperty(this,'onerror',{writable:true,configurable:true,value:this._betterEvents.options.onerror})
         
         this.removeAllListeners(); //resets/sets default values of additional properties on this._betterEvents
     }
@@ -66,21 +109,30 @@
     * This method can be changed to another function to set the default value
     * for each instance subsequently created.
     */
-    BetterEvents.prototype._defaultEmitErrorHandler=console.error;
+    BetterEvents.prototype.onerror=null;
+
+
+  
 
 
     /*
     * Removes all listeners for all events (ie. reset this emitter)
     * @return this
     */
-    BetterEvents.prototype.removeAllListeners = function(){
-        this._betterEvents.events={};
-        this._betterEvents.regexp=[];
-            //^Just like events^, one regexp can have multiple listeners, but regexps are objects so can't
-            // be keys, and we don't want to use a Map since we want to compare their toString()s, so we
-            // will store them on array as [[regex1,func1],[regex2,func2],...]
-        this._betterEvents.onAll=[];
-        this._betterEvents.onUnhandled=null;
+    BetterEvents.prototype.removeAllListeners = function(evt=undefined){
+        //Make compatible with node events
+        if(evt){
+            this.removeEvent(evt);
+        }else{
+            this._betterEvents.events={};
+            this._betterEvents.regexp=[];
+                //^Just like events^, one regexp can have multiple listeners, but regexps are objects so can't
+                // be keys, and we don't want to use a Map since we want to compare their toString()s, so we
+                // will store them on array as [[regex1,func1],[regex2,func2],...]
+            // this._betterEvents.onAll=[];            //2020-10-12: just using regexp now
+            this._betterEvents.onUnhandled=null;
+        }
+
         return this;
     };
 
@@ -151,19 +203,22 @@
         dirty=Object.assign({},dirty,onetime);
         var parsed=Object.assign({},BetterEvents.defaultOptions);
     
-        var parse=function parse(key,type){
+        var types={
+            'groupTimeout':'number'
+            ,'groupDelay':'number'
+            ,'onProgress':'function'
+            ,'listeners':'object'
+            ,'returnStatus':'boolean'
+            ,'onerror':'function'
+        }
+        for(let key in types){
             if(dirty.hasOwnProperty(key)){
-                if(typeof dirty[key]==type)
+                if(typeof dirty[key]==types[key] && dirty[key]!=null)
                     parsed[key]=dirty[key];
                 else
-                    throw new TypeError(`Option '${key}' should be a ${type}, got: ${typeString(dirty[key])}`)
+                    throw new TypeError(`Option '${key}' should be a ${types[key]}, got: ${typeString(dirty[key])}`)
             }
         }
-        parse('bufferDelay','number');
-        parse('groupTimeout','number');
-        parse('groupDelay','number');
-        parse('onProgress','function');
-
 
         if(dirty.exclude){
             if(typeof dirty.exclude=='function')
@@ -186,10 +241,21 @@
             parsed.duplicates=true;
         }
 
+        if(parsed.listeners){
+            if(!parsed.listeners._createdByGetListenersForEmit){
+                throw new Error("Option 'listeners' should be the object returned from getListenersForEmit(), got:"
+                    +JSON.stringify(parsed.listeners));
+            }
+        }
+        
+        //Wrap progress function so it can't throw
+        if(dirty.onProgress)
+            parsed.onProgress=function onProgress(){try{dirty.onProgress.apply(this,arguments)}catch(err){logwarn.call(this,err)}};
+
         return parsed;
     }
 
- /*
+    /*
     * @constructor Listener     These are the objects waiting for events to be emitted
     *
     * @param array args             Array of args
@@ -206,6 +272,8 @@
     function Listener(args, emitter){
         var _b=emitter._betterEvents
 
+        var registeredFrom=args.find(arg=>args instanceof Error)||new Error('Registered from');
+
         Object.defineProperties(this,{
             //For legacy we keep the single character props as getters
             i:{get:()=>this.index,set:(val)=>this.index=val}
@@ -217,6 +285,9 @@
             //Some synomyms for ease
             ,listener:{get:()=>this.callback,set:(val)=>this.callback=val}
             ,event:{get:()=>this.evt,set:(val)=>this.evt=val}
+
+            ,emitter:{writable:true, value:emitter}
+            ,registeredFrom:{value:globalObj.BetterLog?globalObj.BetterLog.filterLinesOutsideFile(registeredFrom,firstLine,lastLine):registeredFrom.stack}
         })
 
 
@@ -266,7 +337,14 @@
             throw new TypeError("No event string or RegExp was passed, got: "+JSON.stringify(this));
 
         //Finally, add a method that can always be used to remove this listener from this object...
-        this.remove=emitter.removeListener.bind(emitter,this.callback,this.evt);
+        this.remove=()=>{
+            try{
+                emitter.removeListener(this.callback,this.evt);
+                return true;
+            }catch(e){
+                return false; //the listener had previously been removed
+            }
+        }
 
         //...and one that can be used to add a timeout that fires if the event hasn't fired within that timespan
         this.timeout=(callback,timeout,cancelOnTimeout)=>{
@@ -280,7 +358,77 @@
                 }
             },timeout);
         }
+
+        
+        /*
+        * Execute (.apply) the callback
+        *
+        * @param object callAs
+        * @param array args
+        * @opt string evt       The event that caused this to run. only relevant if this.evt is regexp
+        *
+        * @return Promise(result,error)       
+        */        
+        this.execute=function(callAs,args,evt){
+            //Make sure that the callback runs async (allowing any sync calls after it to run first)
+            return new Promise((resolve,reject)=>{
+                setTimeout((function executeEventCallback(){
+                    try{ 
+                        //Increment counter
+                        this.runs++;
+
+                        //Remove from emitter BEFORE since the callback may emit the event again
+                        if(this.once)
+                            this.remove();
+
+                        //If our .evt is a RegExp, and a specific event is used to apply (ie. the regular behaviour of emitEvent()),
+                        //prepend that event to the args
+                        if(typeof this.evt!='string' && typeof evt=='string')
+                            args=[evt].concat(args);                     
+
+                        //Now run the callback which may return a value or a promise...
+                        var result=this.callback.apply(callAs,args);
+
+                        //The return value may be reason to remove it...
+                        if(result=='off')
+                            this.remove();
+                        else if(typeof result=='object' && typeof result.then=='function')
+                            result=result.then(res=>{if(res=='off'){this.remove()}return res;});
+                             //^DevNote: the 'off' is meant for here, but we pass it on anyway for potential logging purposes
+
+                        //Finally we return what may be a promise or may be a value
+                        return resolve(result);
+
+                    }catch(err){
+                        reject(err);
+                    }
+                }).bind(this),0)
+            })
+        }
+
+
+        /*
+        * @param string emittedEvt
+        * @return Promise(void,n/a);
+        */
+        this.executeAfter=(emittedEvt)=>{
+            //First wait in case the event is still running, then run it, ignoring any returned value or error
+            var calledWith,listener=this,emittedFrom=new Error("executeAfter called from:");
+            return Promise.resolve(emitter._betterEvents.running[emittedEvt].slice(-1))
+                .then(()=>{
+                    calledWith=emitter._betterEvents.emitted[emittedEvt];
+                    this.execute(_getEmitAs.call(emitter),calledWith,emittedEvt)
+                })
+                .catch(function executeAfterFailed(err){
+                    handleEmitError.call(emitter,'Listener failed.',{listener,calledWith,emittedFrom},err)
+                })
+            ;
+        }
+
+
     }
+
+
 
     /*
     * Add a callback for a specific event, or using regexp for an unspecified number of possible events.
@@ -309,7 +457,7 @@
     };
 
     /*
-    * @shortcut addListener(,,false)   
+    * @shortcut addListener
     * @return <Listener>       
     */
     BetterEvents.prototype.on=function(evt,listener){
@@ -317,11 +465,11 @@
     }
 
     /*
-    * @shortcut addListener(,,true)
+    * @shortcut addListener
     * @return <Listener>      
     */
     BetterEvents.prototype.once=function(evt,listener){
-        return this.addListener(evt,listener,true);
+        return this.addListener(evt,listener,true); //true=>once
     }
 
 
@@ -366,28 +514,34 @@
     *
     * @return object|false        {l,i}
     */
-    BetterEvents.prototype.onAll=function(listener,index=undefined){
-        if(typeof listener!='function')
-            throw new TypeError(errString(1,'listener',listener));
+    // BetterEvents.prototype.onAll=function(listener,index=undefined){
+    //     if(typeof listener!='function')
+    //         throw new TypeError(errString(1,'listener',listener));
 
-        var _b=this._betterEvents, obj=_b.onAll.find(obj=>obj.l==listener);
-        if(obj){
-            //If it already exists, just change the number if another is given here
-            if(typeof index=='number')
-                obj.i=index;
-        }else{
-            //NOTE: this object has no 'e' prop, which means that emitEvent() will call it
-            //with the evt string as first arg and it will be ignored by removeEvent()
+    //     var _b=this._betterEvents, obj=_b.onAll.find(obj=>obj.l==listener);
+    //     if(obj){
+    //         //If it already exists, just change the number if another is given here
+    //         if(typeof index=='number')
+    //             obj.i=index;
+    //     }else{
+    //         //NOTE: this object has no 'e' prop, which means that emitEvent() will call it
+    //         //with the evt string as first arg and it will be ignored by removeEvent()
 
-            _b.onAll.push({l:listener,i:(typeof index=='number' ? index : _b.options.defaultIndex)});
-        }
+    //         _b.onAll.push({l:listener,i:(typeof index=='number' ? index : _b.options.defaultIndex)});
+    //     }
 
-        return;
+    //     return;
+
+    // }
+
+    /*
+    * Add a listener for all events        //2020-10-12: just using regexp now
+    *
+    * @return <Listener>
+    */
+    BetterEvents.prototype.onAll=function(){
+        return this.addListener(/.+/,...Array.from(arguments));
     }
-
-
-
-
 
 
 
@@ -447,54 +601,29 @@
     * @throws TypeError
     * @return object|undefined      If already emitted and $once==true then undefined is returned, else the 
     *                                 registered listener object  {e,o,l,i,n,remove,timeout}
+    * @any-order
     */
-    BetterEvents.prototype.after=function after(evt,callback,once,index){
-        //First we check if it's been emitted. If evt is regex, then _evt will be the
-        //string of the first matched emitted event.
-        var _evt=this.alreadyEmitted(evt);
+    BetterEvents.prototype.after=function after(){
+        //Add a listener so we get same handling 
+        var listener=this.addListener.apply(this,arguments);
 
-        //If it hasn't been emitted, or if we want the callback to run every time, we add it as a listener. NOTE: this
-        //is what determines if something is returned
-        if(!_evt || !once)
-            var listener=this.addListener(evt,callback,once,index);
+        //Now check if it's already been emitted, in which case we apply the listener with those arguments now
+        var emittedEvt=this.alreadyEmitted(listener.evt);
+        if(emittedEvt){
+            //Apply the listener with the args of the emitted event (this returns a promise that always resolves
+            //that we don't wait for)
+            listener.executeAfter(emittedEvt);
 
-        //If the event HAS been emitted, either way of ^, we want to run it right away... but we add a 1ms timeout
-        //to make sure anything running synchronously as a chance to run first
-        if(_evt){
-
-            //Get the args used last...
-            var args=this._betterEvents.emitted[_evt];
-
-            //...but if $evt is regexp, then the listener is expecting _evt to be the first arg, just 
-            //like it would/will when called from emitEvent, however the stored args will
-            //not contain the event, so we need to do the same thing here that we do in emitEvent()
-            if(evt instanceof RegExp)
-                args=[_evt].concat(args);
-
-
-            //Wait for the last currently running event to finish (which may be none)...
-            Promise.resolve(this._betterEvents.running[_evt].slice(-1))
-            //...then wait 1 ms so anything run sync after after() has a chance to fire (not sure if necessary)...
-                .then(()=>(new Promise(resolve=>setTimeout(resolve,1))))
-            //...theeeen execute the callback
-                .then(()=>{
-                    try{
-                        //If we registered a listener we'll want to increment its counter
-                        if(listener)
-                            listener.n++
-
-                        callback.apply(this,args);
-                    }catch(err){
-                        this._betterEvents.onerror(`after() event callback '${_evt}' failed:`,err
-                                ,'Called with args:',args)
-                    }
-                })
-            ;
-
+            //If we were only supposed to run once, then the listener has no future use so return undefined
+            if(listener.once)
+                return;
         }
-
+        
+        //This implies that the listener may run again so return it
         return listener;
     }
+
+
 
 
     /*
@@ -508,7 +637,7 @@
     BetterEvents.prototype.afterPromise=function afterPromise(evt,index){
         return new Promise((resolve,reject)=>{
             try{
-                this.after(evt,(...args)=>resolve(args),true,index);
+                this.after(evt,(...args)=>resolve(args),'once',index);
             }catch(err){
                 reject(err);
             }
@@ -521,87 +650,209 @@
     *
     * NOTE: This will fire 1 ms after the last event so that any event listeners can be added before
     *
-    * @param string evt             Name of new event
+    * @param string cEvt            Name of new compound event
     * @param array[string] events   List of events to fire after
     *
-    * @return object|undefined      If already emitted and $once==true then undefined is returned, else the 
-    *                                 registered listener object  {e,o,l,i,n,remove,timeout}
+    * @return object                {fired:{evt1:args,evt3:args},remaining:[evt2,evt4],cancel:f()}
+    *             
     */
-    BetterEvents.prototype.createCompoundEvent=function createCompoundEvent(evt, events){
-        if(typeof evt!='string')
+    BetterEvents.prototype.createCompoundEvent=function createCompoundEvent(cEvt, events){
+        if(typeof cEvt!='string')
             throw new TypeError(errString(1,'s_evt',evt));
-        if(!events instanceof Array)
+        if(!events instanceof Array || !events.length)
             throw new TypeError(errString(2,'an array of events',events));
 
         //Register listeners after each event we're listening for which stores the emitted data and counts down 
         //until all have been emitted, at which time our event is emitted
         //2019-11-25 DEAR FUTURE ME: don't define the function seperately since we need the 'evt' which
         //                      comes from the forEach()
-        var callbackArgs={},remaining=events.length;
-        events.forEach(_evt=>this.after(_evt,(...args)=>{
-            callbackArgs[_evt]=args;
+        var cancelled=false
+            ,compound={fired:{},remaining:events.slice(0),cancel:()=>cancelled=true}
+            ,errOnFail=new Error(`Listener for compound event '${cEvt}' failed. (Note: this stack shows where the compound event was registered)`)
+            ,self=this
+        ;
+        events.forEach(evt=>this.after(evt,'once',function executeCompoundEvent(...args){
+              //DevNote: Any error emitted here will show .emittedFrom as an empty event
+            try{
+                if(cancelled)
+                    return;
 
-            //...then decrement the counter and check if it's reached zero...
-            remaining--;
-            if(remaining<1){
-                //...if it has, that means all events have fired and we can now call the passed in listener
-                setTimeout(()=>{
-                    try{
-                        console.warn("RUNNING COMPOUND "+evt);
-                        this.emit(evt,callbackArgs);
-                    }catch(err){
-                        this._betterEvents.onerror(`Compound event '${evt}' failed:`,err)
-                    }
-                },1)
+                //Store the args of this event
+                compound.fired[evt]=args;
+
+                //As ^ growns, remaining shrinks...
+                compound.remaining.splice(compound.remaining.indexOf(evt),1);
+
+                //When no more events remain...
+                if(!compound.remaining.length){
+                    //...if it has, that means all events have fired and we can now call the passed in listener
+                    logdebug.call(self,`Running compound event '${cEvt}' now with:`,compound.fired)
+                    self.emitEvent(cEvt,[compound.fired],undefined,errOnFail);
+                }else{
+                    logdebug.call(self,`'${evt}' just ran, but compound event '${cEvt}' is still waiting on: ${compound.remaining.sort()}`)
+                }
+            }catch(err){
+                logwarn.call(self,`Compound event '${cEvt}' will not run.`,err)
+                compound.cancel();
             }
-        },'once'));
+        }));
+
+        return compound;
     }
 
     /*
     * Execute a callback once after all events in a list have been fired. 
     *
-    * @param array events
-    * @param function callback  Called with single object. Keys are event names, values are 
-    *                           arrays of args emitted for that event
-    * @opt number timeout       If passed, an event error will be logged if the callback hasn't been called yet
-    * @opt bool cancelOnTimeout If truthy, when timeout fires the listener will be removed from the event
+    * @param array[string] events   List of events to fire after
+    * @param function callback      Called with single object. Keys are event names, values are 
+    *                                arrays of args emitted for that event
+    * @opt number timeout           If passed, an event error will be logged if the callback hasn't been called yet
+    * @opt bool cancelOnTimeout     If truthy, when timeout fires the listener will be removed from the event
     *
     * @throws TypeError
-    * @return object            The registered listener object  {e,o,l,i,n,remove,timeout}
+    * @return object                The registered listener object  {e,o,l,i,n,remove,timeout}
     */
     BetterEvents.prototype.afterAll=function(events,callback,timeout,cancelOnTimeout){
-        if(!events instanceof Array)
+        if(!events instanceof Array||!events.length)
             throw new TypeError(errString(1,'an array of events',events));
         if(typeof callback!='function')
             throw new TypeError(errString(2,'a callback function',callback));
 
+        
         //Copy to break links from passed in array (so we can always run)
         events=events.slice(0);
 
         //Check if an compound event for these events has already been created, else do so now
-        var evt='compoundEvent_'+events.join('|');
-        if(this.getListeners(evt,true).length==0)
-            this.createCompoundEvent(evt,events);
+        var cEvt='compoundEvent_'+events.map(evt=>evt.toString()).sort().join('|');
+        if(this.getListeners(cEvt,true).length==0)
+            var compound=this.createCompoundEvent(cEvt,events); 
+
 
         //Now register the callback
-        var listener=this.addListener(evt,callback,'once');
+        var listener=this.addListener(cEvt,callback,'once');
 
-        //Create getter which lists the remaining events so we can always check what we're waiting for
+
+
+        //Create getter which lists the remaining and fired events so we can always check what we're waiting for. If we just
+        //created $compound ^ then use the props on it instead of building it here...
         Object.defineProperty(listener,'remaining',{
             enumberable:true
-            ,get:()=>events.filter(evt=>this.alreadyEmitted(evt)==undefined)
+            ,get:()=>compound?compound.remaining.slice(0):events.filter(evt=>this.alreadyEmitted(evt)==undefined)
+        });
+        Object.defineProperty(listener,'fired',{
+            enumberable:true
+            ,get:()=>{
+                if(compound)
+                    return Object.assign({},compound.fired);
+                var fired={};
+                for(let evt of events){
+                    evt=this.alreadyEmitted(evt); //check if it's been emitted (and if a regexp get the actuall evt name)
+                    if(evt)
+                        fired[evt]=this._betterEvents.emitted[evt];
+                };
+                return fired;
+            }
         });
 
         //If a timeout is passed
         if(typeof timeout=='number'){
             listener.timeout(()=>{
-                let logstr=callback.name||evt + (cancelOnTimeout ? ' timed out (and is now cancelled)' : " hasn't fired yet, still")
-                this._betterEvents.onerror(`${logstr} waiting on events: ${listener.remaining}`);
+                let logstr=(callback.name?`Callback ${callback.name}()`:'A callback')+` for ${cEvt}` 
+                logstr+=(cancelOnTimeout ? ' is now cancelled (timed out)' : " hasn't run yet");
+                let remaining=listener.remaining;
+                if(!remaining.length){
+                    logerror.call(this,`BUGBUG: ${logstr}, but all events have fired:`,listener.fired);
+                }else{
+                    logerror.call(this,`${logstr} because we are still waiting on ${remaining.length} events: `
+                        +`'${remaining.join("','")}'.`);
+                }
             },timeout,cancelOnTimeout);
         }
 
         return listener;
     }
+
+
+    /*
+    * Add listeners for multiple events, removing all of them once the first runs
+    *
+    * NOTE: This method will apply .addListener() with every item in arguments, so we're expecting:
+    *   [cb1,evt1],[cb2,evt2]
+    *
+    * NOTE2: By definition 'once' applies to all listeners
+    *
+    * @return array[<Listeners>...]     Also has secrect method .removeAll()
+    */
+    BetterEvents.prototype.onFirst=function(){
+        try{
+            //Define an array or listeners and a method to remove them all
+            var listeners=[], removeListeners=()=>{
+                try{
+                    var listener;
+                    while(listener=listeners.pop()){
+                        try{this.removeListener(listener)}catch(err){logerror.call(this,err,listener)}
+                    }
+                }catch(err){logerror.call(this,err)}
+            };
+            for(let args of arguments){
+                //Create a listener and add it to our list
+                let listener=this.addListener.apply(this,args)
+                listeners.push(listener);
+
+                //Wrap the callback in another function that removes all other listeners before running
+                let cb=listener.callback;
+                listener.callback=function(){
+                    removeListeners();
+                    return cb.apply(this,arguments);
+                }
+            }
+
+            //Attach the remove-method to the returned array for ease...
+            Object.defineProperty(listeners,'removeAll',{value:removeListeners});
+
+            return listeners;
+
+        }catch(err){
+            //Anything goes wrong and we remove any listeners we had time to add, before re-throwing the error
+            removeListeners();
+            throw err; //rethrow
+        }
+    }
+
+
+    /*
+    * Works like a hybrid of after() and onFirst(), ie. a single callback runs *after* the first event
+    *
+    * @return array[<Listeners>...]|undefined     @see .onFirst() or .after()
+    */
+    BetterEvents.prototype.afterFirst=function(){
+        //First add them all...
+        var listeners=this.onFirst.apply(this,arguments);
+
+        //...then check if any have already run
+        for(let listener of listeners){
+            let emittedEvt=this.alreadyEmitted(listener.evt);
+            if(emittedEvt){
+                listener.executeAfter(emittedEvt);
+
+                //Just like with .after() we return undefined here since all the listeners have already been removed
+                return;
+            }
+        }
+
+        return listeners;
+    }
+
+
+
+
+
+
+
+
+
+
+
 
 
 
@@ -642,6 +893,8 @@
                 if(evt.match(regex))
                     listeners=listeners.concat(events[evt]);
             }
+        }else if(!arguments.length){
+            throw new Error("getListeners() was called without arguments. It needs to be called with an event name or regexp.");
         }else{
             throw new TypeError(errString(1,'evt',evt));
         }
@@ -660,25 +913,7 @@
 
 
 
-    /*
-     * Count the number of listeners that would run for a given event
-     *
-     * @param string|<RegExp>   evt             
-     * @param @opt boolean countUnhandled   Default false. If true, will return -1 if only an onUnhandled/onAll listener 
-     *                                       exists for this listener
-     *
-     * @return number               
-     */
-    BetterEvents.prototype.countListeners = function countListeners(evt, countCatchAll=false) {
-        let l=this.getListeners(evt,this._betterEvents.options.duplicate).length
 
-        if(l)
-            return l+this._betterEvents.onAll.length;
-        else if(countCatchAll && (this._betterEvents.onUnhandled||this._betterEvents.onAll.length))
-            return -1*(this._betterEvents.onAll.length+(this._betterEvents.onUnhandled?1:0));
-        else 
-            return 0;
-    }
 
     /*
     * Check if an event has any listeners at all
@@ -689,11 +924,12 @@
     */
     BetterEvents.prototype.hasAnyListeners = function hasAnyListeners(evt) {
         //Quick check if we have any catch-alls...
-        if(this._betterEvents.onAll.length || this._betterEvents.onUnhandled)
+        // if(this._betterEvents.onAll.length || this._betterEvents.onUnhandled) //2020-10-12: just using regexp now
+        if(this._betterEvents.onUnhandled)
             return true;
 
         //...then check for specific ones
-        return this.countListeners(evt)>0;
+        return this.getListeners(evt).length>0;
     }
 
 
@@ -761,52 +997,45 @@
     * Removes a single registered evt-listener combo. Ie. if regexp is used, only a registered
     * regexp will be removed, not every event matching that regexp
     *
-    * @param object|function      listener   A listener function, or an object with props e and l
-    * @param @opt string|<RegExp> evt        Optional only if $listener is an object with .e (which is the event).
+    * @param <Listener>|function   listener   
+    * @param string|<RegExp>       evt        Ignored if $listener is <Listener>
     *
     * @throws TypeError
     * @throws Error     If the listener doesn't exist
     *
-    * @return {e,o,l,i}|undefined      The removed listener objects, or undefined
+    * @return <Listener>|undefined      The removed listener object, or undefined
     */
     BetterEvents.prototype.removeListener=function(listener,evt){
-        // console.log('REMOVING',listener,evt);
-        if(listener instanceof Object && evt==undefined){
-            if(!listener.e){
-                // console.log('non-standard listener:',arguments)
-                return undefined //ie. a non-standard listener, not stored on .events or .regexp
-            }
-            evt=listener.e
-            listener=listener.l
+
+        if(listener instanceof Listener){
+            evt=listener.evt;
+            listener=listener.listener;
         }else if(typeof listener!='function'){
-            throw new TypeError(errString(i,'listener',listener));
+            throw new TypeError(errString(1,'listener',listener));
         }
 
-        var arr;
+        //Now get the applicable list of events or regexes <Listeners>
         if(typeof evt=='string')
-            if(this._betterEvents.events[evt] instanceof Array)
-                arr=this._betterEvents.events[evt]
-            else
-                throw new Error("No listeners registered for event: "+evt);
+            var events=this._betterEvents.events[evt]||[];
         else if(evt instanceof RegExp)
-            arr=this._betterEvents.regexp;
+            events=this._betterEvents.regexp;
         else
             throw new TypeError(errString(2,'evt',evt));
 
+        //Now match $listner and $evt
+        let i=events.findIndex(obj=>obj.listener==listener && String(obj.evt)==String(evt));
+        if(i>-1)
+            return events.splice(i,1)[0];
+        
 
-        let i=arr.findIndex(({e,l})=>l==listener && e==evt);
-        if(i>-1){
-            // console.log("Removing ", arr[i])
-            return (arr.splice(i,1))[0];
+        //Finally, check the unhandled section...
+        if(this._betterEvents.onUnhandled && this._betterEvents.onUnhandled.listener==listener){
+            listener=this._betterEvents.onUnhandled;
+            this._betterEvents.onUnhandled=null;
+            return listener;
         }
-        else{
-            let lines=String(listener).split('\n');
-            if(lines.length>8)
-                lines=lines.slice(0,4).concat('...'+String(lines.length-8)+' lines ...',lines.slice(-4))
-            throw new Error(`No such listener for event '${evt}': \n${lines.join('\n')}`);
-        }
 
-
+        return undefined;
     }
 
     /*
@@ -816,36 +1045,35 @@
     *
     * @throws TypeError
     *
-    * @return array[string|<RegExp>]    An array of the events the listener
-    *                                   was removed from (can be empty)
+    * @return array[string|<RegExp>]    An array of the events the listener was removed from (can be empty)
     */
     BetterEvents.prototype.removeListeners=function(listener){
         if(typeof listener !='function')
             throw new TypeError(errString(1,'listener',listener));
-        
-        var events=[];
 
-        function remove(arr, evt){
-            var i=arr.length-1;
-            for(i;i>=0;i--){
-                if(arr[i].l==listener){
-                    events.push(evt||arr[i].e);
-                    arr.splice(i,1);
-                }
+        var removed=[];
+        var remove=function(events){
+            for(let i=events.length-1;i>-1;i--){
+                if(events[i].listener==listener)
+                    removed.push(events.splice(i,1));
             }
         }
 
-        this._betterEvents.events.forEach(remove)
+        //Loop through all events and remove every <Listener> with .listener==$listener
+        Object.values(this._betterEvents.events).forEach(remove);
 
+        //Check regexp...
         remove(this._betterEvents.regexp);
-        remove(this._betterEvents.onAll,'onAll');
 
-        if(this._betterEvents.onUnhandled.l==listener){
-            events.push('onUnhandled');
+        //Check unhandled
+        if(this._betterEvents.onUnhandled.listener==listener){
+            removed.push(this._betterEvents.onUnhandled);
             this._betterEvents.onUnhandled=null;
         }
 
-        return events
+        // remove(this._betterEvents.onAll,'onAll'); //2020-10-12: just using regexp now
+
+        return removed;
     }
 
 
@@ -950,10 +1178,11 @@
 
 
 
-
-
     /*
-    * For internal use by emitEvent. Will add onAll and onUnhandled listeners to $listeners array
+    * Get an object of listerners ready to be passed to/used by emitEvent(). 
+    *
+    * ProTip: This method can be called in advance of emitEvent() and then passed in as the option .listeners
+    *         in order to determine ahead of going async which listeners are included
     *
     * @param string|<RegExp> evt
     * @param function|array[function] exclude
@@ -970,24 +1199,24 @@
     * @call(this)
     * @private
     */
-    function _getGroupedListeners(evt,exclude){
-if(evt=='settings') console.log('_getGroupedListeners exclude:',exclude)
+    BetterEvents.prototype.getListenersForEmit=function(evt,exclude){
 
         var listeners=this.getListeners(evt,this._betterEvents.options.duplicate)
 
         //If no listeners were found, this is an 'unhandled' event, which merits the onUnhandled listener
         if(!listeners.length && this._betterEvents.onUnhandled ){
-            // console.log('Adding onUnhandled')
+            // logdebug.call(this,'Adding onUnhandled')
             listeners.push(this._betterEvents.onUnhandled)
         }
-        // else{console.log('NOT adding onUnhandled to:',listeners)}
+        // else{logdebug.call(this,'NOT adding onUnhandled to:',listeners)}
 
+    //2020-10-12: just using regexp now
         //If onAll has been specified, always add it (will end up first in its group, but unless the group
         //is otherwise empty it will run concurrently with other listeners)
-        if(this._betterEvents.onAll.length){
-            // console.log('Adding onAll')
-            listeners=[].concat(this._betterEvents.onAll,listeners)
-        }
+        // if(this._betterEvents.onAll.length){                                   
+        //     // logdebug.call(this,'Adding onAll')
+        //     listeners=[].concat(this._betterEvents.onAll,listeners)
+        // }
 
          //Remove any we want to exclude (parseOptions should have made sure it's an array)
         if(exclude){
@@ -999,162 +1228,205 @@ if(evt=='settings') console.log('_getGroupedListeners exclude:',exclude)
         }
 
         //Group listeners based on their index
-        var groups={};
+        var groupedListeners={};
         listeners.forEach(listener=>{
-            let i=(listener.hasOwnProperty('i')?listener['i']:0);
-            (groups[i]=groups[i]||[]).push(listener)
+            let group=(listener.hasOwnProperty('i')?listener['i']:0);
+            (groupedListeners[group]=groupedListeners[group]||[]).push(listener)
         })
 
-        return groups;
+        //And finally, to be used by parseOptions, a secret flag
+        Object.defineProperty(groupedListeners,'_createdByGetListenersForEmit',{value:true});
+
+        return groupedListeners;
     }
 
 
 
     /*
-    * @param object groups  The object returned by _getGroupedListeners()
-    * @opt boolean simple   Default false. If true the returned object will lack all bells and whistles
-    * @return object        The object populated and then returned by emitEvent
+    * @param object groupedListeners The object returned by _getGroupedListeners()
+    * @param boolean returnStatus    If true this function will add a bunch of getters to @return and that object will be returned by emitEvent()
+    *
+    * NOTE: This object is the one passed to onProgress(), so you may want to set returnStatus==true if you plan on showing pretty progress stuff
+    *
+    * @return object                 The object populated and then returned by emitEvent
     * @private
     */
-    function _getStatusObj(groups,simple=false){
-        let o={};
-        Object.defineProperties(o,{
-            'results':{value:[]}
-            ,'groups':{value:Object.keys(groups).sort()}// <<---------------------------------- this is what decides group order
+    function _getStatusObj(groupedListeners,returnStatus){
+        var status={};
+        Object.defineProperties(status,{
+            'results':{value:[]}  //results in whichever order they finish, child arrays are [true/false, result, i, j]
+            ,'groups':{value:Object.keys(groupedListeners).sort()}// <<---------------------------------- this is what decides group order
             ,'intercepted':{value:false, writable:true}
-            ,'promise':{writable:true, value:undefined} 
-              //^changed by emitEvent() to return o.results. defined here so non-enum so getters vv don't count it
+            ,'promise':{writable:true, value:undefined, enumerable:false} 
+              //^changed to an actual promise by emitEvent() to return o.results. defined here as non-enum so getters vv don't count it
         });
 
-        for(let i in groups){
-            o[i]={};
-            for(let j in groups[i]){
-                o[i][j]='waiting';
+        Object.defineProperty(status.results,'get',{value:function getResult(g,j){return status.results.find(result=>result[2]==g && result[3]==j)}});
+
+        var l=0
+        for(let g of status.groups){  //this is the ordered keys
+            let group=status[g]={};             //these are the only enumerable props on the status object...
+            for(let j in groupedListeners[g]){
+                group[j]='waiting';             //...and these the only enumerable on ^
+                l++;
             }
-            if(!simple){ 
-                //Add sum'ers for states in the group
-                Object.defineProperties(o[i],{
-                    'length':{value:Object.keys(o[i]).length}
-                    ,'listeners':{value:groups[i]}
-                    ,'waiting':{get:()=>Object.values(o[i]).reduce((sum,state)=>sum+(state=='waiting'?1:0),0)}
-                    ,'executing':{get:()=>Object.values(o[i]).reduce((sum,state)=>sum+(state=='executing'?1:0),0)}
-                    ,'finished':{get:()=>Object.values(o[i]).reduce((sum,state)=>sum+(state=='finished'?1:0),0)}
-                    ,'started':{get:()=>o[i].length>o[i].waiting}
-                    ,'remaining':{get:()=>o[i].length-o[i].finished}
-                    ,'done':{get:()=>o[i].executing==0&&o[i].started}
-                    ,'progress':{get:()=>o[i].finished/o[i].length}
-                    ,'names':{value:Object.values(groups[i]).map(obj=>obj.l.name||'anonymous')}
-                    ,'entries':{get:()=>o[i].names.map((name,j)=>[name,o[i][j],i,j])}
-                     //^use this last one to get list of unfinished funcs... or better yet use the aggregate one vv
+
+            //If opted add getters that get states in the group
+            if(returnStatus){ 
+                Object.defineProperties(group,{
+                    'length':{value:Object.keys(group).length}
+                    ,'listeners':{value:groupedListeners[g]}
+                    ,'waiting':{get:()=>Object.values(group).reduce((sum,state)=>sum+(state=='waiting'?1:0),0)}
+                    ,'executing':{get:()=>Object.values(group).reduce((sum,state)=>sum+(state=='executing'?1:0),0)}
+                    ,'finished':{get:()=>Object.values(group).reduce((sum,state)=>sum+(state=='finished'?1:0),0)}
+                    ,'started':{get:()=>group.length>group.waiting}
+                    ,'remaining':{get:()=>group.length-group.finished}
+                    ,'progress':{get:()=>Math.round(group.finished/group.length*100)||0}
+                    ,'done':{get:()=>group.progress==100}
+                    ,'names':{value:Object.values(groupedListeners[g]).map(listener=>listener.callback.name||'anonymous')}
+                    ,'statusEntries':{value:()=>group.names.map((name,j)=>[name,group[j],g,j])}
+                     //^DevNote: We call it 'statusEntries' because it kind of works like Object.entries(group) except we're using the name instead of the key
                 })
             }
-
         }
+        Object.defineProperty(status,'length',{value:l});
 
-        if(!simple){
-            Object.defineProperties(o,{
-                'length':{value:Object.values(o).reduce((sum,group)=>sum+group.length,0)}
-                ,'listeners':{value:groups}
-                ,'waiting':{get:()=>Object.values(o).reduce((sum,group)=>sum+group.waiting,0)}
-                ,'executing':{get:()=>Object.values(o).reduce((sum,group)=>sum+group.executing,0)}
-                ,'finished':{get:()=>o.results.length}
-                ,'progress':{get:()=>o.finished/o.length}
-                ,'groupsStarted':{get:()=>Object.values(o).reduce((sum,group)=>sum+(group.started?1:0),0)}
-                ,'groupsDone':{get:()=>Object.values(o).reduce((sum,group)=>sum+(group.done?1:0),0)}
-                ,'groupsExecuting':{get:()=>o.length-o.groupsDone}
-                ,'groupsWaiting':{get:()=>o.length-o.groupsStarted}
-                ,'entries':{get:()=>{
-                    var entries=[];
-                    for(let i of Object.keys(o)){
-                        o[i].entries.forEach(entry=>{
-                            entry.push(i);
-                            entries.push(entry);
-                        })
-                    }
-                    return entries;
-                }}
+        //If opted add getters that sum every group to give aggregates
+        if(returnStatus){
+            Object.defineProperties(status,{
+                'listeners':{value:groupedListeners}
+                ,'waiting':{get:()=>Object.values(status).reduce((sum,group)=>sum+group.waiting,0)}
+                ,'executing':{get:()=>Object.values(status).reduce((sum,group)=>sum+group.executing,0)}
+                ,'finished':{get:()=>status.results.length} //regarless of group, how many listeners have finished
+                ,'progress':{get:()=>Math.round(status.finished/status.length*100)||0} //of total listeners, how many have finished, 0-100
+                ,'done':{get:()=>status.progress==100}
+                ,'names':{get:()=>status.groups.map(g=>status[g].names).flat()}
+                ,'statusEntries':{value:()=>status.groups.map(g=>status[g].statusEntries()).flat()}
+
+                ,'groupsStarted':{get:()=>Object.values(status).reduce((sum,group)=>sum+(group.started?1:0),0)}
+                ,'groupsDone':{get:()=>Object.values(status).reduce((sum,group)=>sum+(group.done?1:0),0)}
+                ,'groupsExecuting':{get:()=>status.length-status.groupsDone}
+                ,'groupsWaiting':{get:()=>status.length-status.groupsStarted}
                 
             })
         }
+        return status;
+    }
 
-        return o;
+    /*
+    * Get the object to call each callback with
+    *
+    * @opt object options
+    * @return object
+    */
+    function _getEmitAs(options){
+        options=options||this._betterEvents.options;
+        switch(options.emitAs){
+            case 'global':
+            case null:
+                return globalObj;
+            case 'shared':
+            case 'empty':
+            case 'object':
+                return {}; 
+            case undefined:
+            case 'this':
+                return this; 
+            default: 
+                if(typeof options.emitAs=='object'){
+                    return options.emitAs;
+                }else{
+                    handleEmitError.call(this,"Bad option .emitAs: ("+typeof options.emitAs+")"+String(options.emitAs));
+                    return globalObj;
+                }
+        }
     }
 
 
-
-
-
-
-
+    /*
+    * Turn args into an arguments object
+    * @param array|<arguments>|any
+    * @return <arguments>
+    */
+    function makeArgs(args){
+        if(args==undefined){
+            args=[];
+        }else if(typeof args=='object' && args){
+            if(args.hasOwnProperty('callee') && args.hasOwnProperty('length') && Object.getOwnPropertySymbols(args).map(String)=='Symbol(Symbol.iterator)')
+                return args;
+            else if(!Array.isArray(args))
+                args=[args];
+        }else{
+            args=[args];
+        }
+        return _makeArgs.apply(this,args);
+    }
+    function _makeArgs(){return arguments;}
 
 
     /**
     * Call all listeners for an event async/concurrently
     *
+    * NOTE: Which listeners will be called is determined synchronously when this method is called
+    *
     * @param string evt
-    * @param @opt array args
-    * @param @opt object options    Props may include
+    * @opt array args
+    * @opt object options    Props may include
     *                                exclude - function|array    One or more listeners to exclude
     *                                onProgress - function       A callback called after each change to the returned object
     *                                groupTimeout - number      
-    *                                simple - boolean            If true, only status.promise will be returned, and any progress
-    *                                                             callback will only get simple status object as arg#2
+    *                                returnStatus - boolean     If true this method returns @see _getStatusObj(). The same object
+    *                                                           is arg#2 to onProgress() (ie. if you plan to use it's getters you
+    *                                                           need to pass true here)
+    *                                listeners - array          The results from this.getListenersForEmit(). Emit the event to these 
+    *                                                           listeners INSTEAD OF calling getListenersForEmit() now.
+    * @opt <Error> emittedFrom   An error used if the listener failed (good since it's stack can reflect something more telling...)
     *
     * @throws TypeError
-    * @return object        @see _getStatusObj() + additional properties:
-    *                           results - array[array...] The response from each listener, in whatever order they finish, 
-    *                                                      good/bad/undefined all mixed together. Child arrays contain:
-    *                                                        ['success boolean', 'return value', 'group id', 'in-group id']
-    *                           promise - <Promise>       Resolves (always) with $results after ALL listeners have run 
-    *                                                       to end.
+    * @return Promise(array[array,...],void)    Resolves when all listeners have finished with an array of arrays. Each child array
+    *                                           is in the result from a single listener, in the order they finished (ie. not necessarily 
+    *                                           the order they were called. Format of child arrays:
+    *                                               ['success boolean', 'return value', 'group id', 'in-group id']
     *
-    * @return-if($options.simple==true) promise                              
+    * @return-if object $options.returnStatus==true   @see _getStatusObj(). The above described array is set as prop .results, and the
+    *                                                 promise as .promise
     */
-    BetterEvents.prototype.emitEvent = function(evt, args=undefined, options=undefined) {
+    BetterEvents.prototype.emitEvent = function(evt, args=undefined, options=undefined,errOnFail=undefined) {
         //Only allow string events. For emitting all events that match a regexp, use emitEvents()
         if(typeof evt!='string')
             throw new TypeError(errString(1,'s_evt',evt));
 
-        var _b=this._betterEvents
-        options=parseOptions(_b.options,options)
-        var prog=options.onProgress; //will always be a func, possibly an empty one
+        options=parseOptions(this._betterEvents.options,options)
+        var prog=options.onProgress //will always be a func, possibly an empty one
+            ,groupedListeners=options.listeners||this.getListenersForEmit(evt,options.exclude)
+            ,status=_getStatusObj(groupedListeners, options.returnStatus)
+            ,emitAs=_getEmitAs.call(this, options) //won't matter if callback is bound
+        ;
 
-
-        var groups=_getGroupedListeners.call(this,evt,options.exclude);
-        var status=_getStatusObj(groups,options.simple); //<-- this is the object returned by emitEvent() unless options.simple==true
-
-
-        //Determine what all the emitters will be called as (remember, if they've bound to something else, this won't matter)
-        switch(options.emitAs){
-            case 'global':
-                options.emitAs=globalObj; break;
-            case 'shared':
-                options.emitAs={}; break;
-            case 'status':
-                options.emitAs=status; break;
-            case 'empty':
-                Object.defineProperty(options,'emitAs',{get:()=>{return {};}}); break;
-            default: //there should be no other choises... but whatever
-            case 'this':
-                options.emitAs=this; break;
-        }
-        // console.log('EMITTING:',evt)
-        //Make sure we have an array. This also delinks it from the passed in array BUT IT DOES NOT delink the individual args
+        //Make sure we have an arg array AND delink it from the passed in array (BUT IT DOES NOT delink the individual args)
         args=[].concat(args);
+          //NoteToSelf 2020-11-11: Don't change this into an arguments object... 
+
 
         //Allow possibility to intercept an event...
-        if(_b.intercept.hasOwnProperty(evt))
-            args=_b.intercept[evt].apply(this,args);
+        if(this._betterEvents.intercept.hasOwnProperty(evt)){
+            args=this._betterEvents.intercept[evt].apply(this,args);
+            
+            //...and if it doesn't return an array of new args we classify the event as "intercepted" and we return early
+            if(!Array.isArray(args)){
+                status.intercepted=true;
+                status.promise=Promise.resolve(status.results);
+                prog(evt,status);
+            }
+        }
 
-        //...and if it doesn't return an array of new args we classify the event as "intercepted" and we return early
-        var self=this;
-        if(!Array.isArray(args)){
-            status.intercepted=true;
-            status.promise=Promise.resolve(status.results);
-            prog(evt,status);
-        }else{
+
+        if(!status.intercepted){
+
             //REMEMBER: everything in this block is async
-            status.promise=new Promise(async function p_emitEvent(resolve){
+            errOnFail=errOnFail instanceof Error?errOnFail:new Error(`Listener for event '${evt}' failed.`);
+            var _b=this._betterEvents, self=this;
+            status.promise=new Promise(async function emitEvent_runListenersAsync(resolve){
                 try{
 
                     //Set event as emitted and running
@@ -1163,70 +1435,66 @@ if(evt=='settings') console.log('_getGroupedListeners exclude:',exclude)
                         _b.running[evt]=[];
                     _b.running[evt].push(status.promise) //is removed at bottom of this promise
 
+                    var lastGroup=status.groups.slice(-1);
+
                     //Loop through all groups, calling all listener in them concurrently/asynchronously, then
                     //wait for the group to finish before moving on to next group, OR timeout a group if opted
-                    var i,last=status.groups.slice(-1),argsRegexp,_args;
-                    for(i of status.groups){
-                        var promises=groups[i].map(async function c_emitEvent(listener,j){
-                            try{
-                                //Mark and count as running...
-                                status[i][j]='executing';
-                                listener.n++;
-                                prog(evt,status,i,j);
+                    for(let g of status.groups){
 
-                                //First check if this is a a one-time listener (do this before calling in case
-                                //the callback emits the event again). NOTE: This will have no effect
-                                if(listener.once === true)
-                                    self.removeListener(listener);
+                        var promises=groupedListeners[g].map(async function emitEvent_forEachListener(listener,j){
+                         //^DevNote: remember, since this function is async it will return a promise... ie. we're not actually
+                         //          awaiting this listener before running the next listener in the same group
 
-                                //For all listeners that don't have an 'exact match' string event, add
-                                //the event to the args
-                                if(typeof listener.e =='string')
-                                    _args=args;
-                                else
-                                    _args=argsRegexp||(argsRegexp=[evt].concat(args));                            
+                            //Sanity check
+                            if(!(listener instanceof Listener)){
+                                let err=handleEmitError.call(self,`EINVAL: BetterEvents.emitEvent('${evt}',...) expects all listeners to be instances of `
+                                    +'BetterEvents.Listener, this one was not:',listener,options);
+                                status.results.push([false,err||'BetterEvents.emitEvent() got invalid listener function',g,j]);
+                                //after this it jumps down and gets status finished...
+                            }else{
+                                try{
+                                    //Mark and count as running...
+                                    status[g][j]='executing';
+                                    prog(evt,status,g,j);                      
 
-                                //Then run the listener and add the result to the resolve-array
-                                let res=await listener.l.apply(options.emitAs,_args);
-                                status.results.push([true,res,i,j]);
-                                
-                                //Finally check if the result implies that we turn off the listener
-                                if(res=='off')
-                                    self.removeListener(listener);
-
-                            }catch(err){
-                                // console.log(err);
-                                _b.onerror('Listener failed.',{evt, listener, _args},err)
-                                status.results.push([false,err,i,j]);
+                                    //Then run the listener and add the result to the resolve-array
+                                    let res=await listener.execute(emitAs,args,evt);
+                                    status.results.push([true,res,g,j]);
+                                }catch(err){
+                                    // logdebug.call(this,err);
+                                    handleEmitError.call(self,errOnFail,err,listener,makeArgs(args));
+                                    status.results.push([false,err,g,j]);
+                                }
                             }
 
-                            status[i][j]='finished'
-                            prog(evt,status,i,j)
+                            status[g][j]='finished'
+                            prog(evt,status,g,j)
                                 
                             return; //Always return, never throw, since these promises are used to determine 
                                     //when all listeners are done
                         })
+
                         
                         //...then wait for them all to finish OR add a timeout
                         var groupedPromises=Promise.all(promises);
-                        if(_b.options.groupTimeout && i!=last){ //last group cannot timeout
+                        if(options.groupTimeout && g!=lastGroup){ //last group cannot timeout
                             try{
-                                let timeout=new Promise((nada,expireGroup)=>{setTimeout(expireGroup,_b.options.groupTimeout)})
+                                let timeout=new Promise((nada,expireGroup)=>{setTimeout(expireGroup,options.groupTimeout)})
                                 await Promise.all([groupedPromises,timeout])
                             }catch(err){
-                                _b.onerror(`Group ${i} timed out, triggering next group...`);
+                                handleEmitError.call(self,`Group ${g} timed out, triggering next group...`);
                             }
                         }else{
                             await groupedPromises;
                         }
 
                         //If we're delaying between groups...
-                        if(_b.options.groupDelay && status.groups.length>1 && i!=last)
-                            await new Promise((wakeup)=>{setTimeout(wakeup,_b.options.groupDelay)})
+                        if(options.groupDelay && status.groups.length>1 && g!=lastGroup)
+                            await new Promise((wakeup)=>{setTimeout(wakeup,options.groupDelay)})
                     }
                 
                 }catch(err){
-                    console.error('BUGBUG BetterEvents.emitEvent():',err);
+                    console.error('BUGBUG - BetterEvents.emitEvent() should have caught and handled all errors, but this got through:',err);
                 }
 
                 //Remove from running
@@ -1239,10 +1507,10 @@ if(evt=='settings') console.log('_getGroupedListeners exclude:',exclude)
 
 
         //Finally (but before all of ^ runs) decide what to return
-        if(options.simple){
-            return status.promise;
-        }else{
+        if(options.returnStatus){
             return status;
+        }else{
+            return status.promise;
         }
     }
 
@@ -1257,24 +1525,29 @@ if(evt=='settings') console.log('_getGroupedListeners exclude:',exclude)
     * @param @opt object options
     *
     * @throws TypeError
-    * @return Promise(void,n/a)     //TODO 2020-02-25: resolve with array just like emit()
+    * @return Promise(object,n/a)     Keys are events that matched $regexp, values are arrays like this.emit()
     */
     BetterEvents.prototype.emitEvents=function(regexp,args,options){
         
         if(!regexp instanceof RegExp)
             throw new TypeError(errString(1,'r_evt',evt));
        
-        var self=this;
+        var self=this,errOnFail=new Error(`Listener matching regexp event '${regexp}' failed.`);
         return new Promise(function _emitEvents(resolve){
 
             var events=self.getEvents(regexp);
 
-            var promises=events.map(evt=>self.emitEvent(evt,args,options).promise);
+            var results={},promises=[];
+            for(let evt of events){
+                let obj=self.emitEvent(evt,args,options,errOnFail);
+                let promise=obj.promise||obj;//since we don't know if options.returnStatus==true
+                promises.push(promise.then(result=>{results[evt]=result}));
+            }
 
-            Promise.all(promises).then(()=>resolve());
+            Promise.all(promises).then(()=>resolve(results));
 
         }).catch(err=>{
-            self._betterEvents.onerror('BUGBUG BetterEvents.emitEvents():',err);
+            handleEmitError.call(self,'BUGBUG BetterEvents.emitEvents():',err);
         })
 
     }
@@ -1284,18 +1557,22 @@ if(evt=='settings') console.log('_getGroupedListeners exclude:',exclude)
     /*
     * Calls emitEvent or emitEvents with multiple args concated into an array
     *
-    * @throw TypeError
-    * @return Promise(array|void)    Resolves when all listeners are done. If a string $evt was used it resolves 
-    *                                  with an array of arrays, each child containing: 
-    *                                   [(bool)success,(any)returned value ,(number) group id, (number) within-group id]
-    *                                  else it resolves with void
+    * @param string|<RegExp> evt
+    *
+    * @throw TypeError         If $evt is bad type
+    * @return <Promise>                                     Always resolves when all listeners are done, even if some listeners failed
+    *
+    * @resolves-if(typeof $evt=='string') array[array,...]  Each child array:
+    *                                                         [(bool)success,(any)returned value ,(number) group id, (number) within-group id]
+    * @resolves-if($evt instanceof RegExp) object           Keys are matching event names, values are arrays-of-arrays like ^
     */
     BetterEvents.prototype.emit=function emit(evt,...args){
-// if(evt=='shutdown'){console.log('emit called',args)}
+// if(evt=='shutdown'){logdebug.call(this,'emit called',args)}
+        var options={returnStatus:false}; //we don't care about the status object having a bunch of getters since we just want the results
         if(evt instanceof RegExp)
-            return this.emitEvents(evt,args);
+            return this.emitEvents(evt,args,options);
         else if(typeof evt=='string')
-            return this.emitEvent(evt,args).promise;
+            return this.emitEvent(evt,args,options); 
         else
             throw new TypeError(errString(1,'evt',evt));
         
@@ -1306,9 +1583,9 @@ if(evt=='settings') console.log('_getGroupedListeners exclude:',exclude)
     * @throw TypeError
     * @return Promise(array|void)   Resolves right away with void (if previously emitted), or when emit() resolves
     */
-    BetterEvents.prototype.emitOnce=function emitOnce(...args){
-        if(!this.alreadyEmitted(args[0])){
-            return this.emit.apply(this,args);
+    BetterEvents.prototype.emitOnce=function emitOnce(evt,...args){
+        if(!this.alreadyEmitted(evt)){
+            return this.emit.call(this,evt,...args);
         }else{
             return Promise.resolve();
         }
@@ -1317,59 +1594,11 @@ if(evt=='settings') console.log('_getGroupedListeners exclude:',exclude)
 
 
 
-    /*
-    * Add an event to a buffer and call emit() after a delay. If the same event is buffered
-    * again within that delay the newer args are emitted instead. 
-    *
-    * @throw TypeError
-    * @return void
-    */
-    BetterEvents.prototype.bufferEvent=function bufferEvent(evt,...args){
-        if(typeof evt !='string')
-            throw new TypeError(errString(1,'s_evt',evt));
-
-        var _b=this._betterEvents
-
-        _b.buffer[evt]=args;
-
-        //Check if we've already triggered the timeout
-        if(!_b.delayTimeout){
-
-            var triggered = Date.now();
-        
-            _b.delayTimeout=setTimeout(()=>{
-                //Log...
-                var actualDelay=Date.now()-triggered;
-                if((actualDelay-_b.options.bufferDelay)>Math.min(_b.options.bufferDelay*0.1,100))
-                    console.warn("WARNING: Delayed event slow. Expected "+_b.options.bufferDelay+" ms, actual "
-                        +actualDelay+" ms");
-
-                //Empty buffer and reset flag so it can be triggered again
-                var buffer=_b.buffer;
-                _b.buffer={};
-                _b.delayTimeout = null;
-
-                //Emit each event individually...
-                for(let evt in buffer){
-                    this.emitEvent(evt,buffer[evt]);
-                }
-
-                //...then emit the buffer as a whole
-                this.emit('_buffer',buffer);
-
-            }, _b.options.bufferDelay)
-        }
-
-        return ;    
-    }
+  
 
 
 
-
-
-
-//TODO 2020-03-19: is 'this' the same as 'global' in nodejs?
-
-}(typeof window !== 'undefined' ? window : this || {}));
+var lastLine=new Error("Last line marker")
+}((typeof window !== 'undefined' ? window : (typeof global!='undefined' ? global : this)) || {}));
 //simpleSourceMap=
 //simpleSourceMap2=
