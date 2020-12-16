@@ -23,7 +23,7 @@
     }
 
     if(typeof process=='object' && typeof process.env=='object' && typeof process.env.NODE_ENV=='string'){
-        var ENV=process.env.NODE_ENV;
+        var development=process.env.NODE_ENV=='development';
     }
     
    
@@ -31,7 +31,7 @@
     * Verbose logger that respects possible devmode
     */
     function logdebug(...args){
-        if(ENV=='development'){
+        if(development){
             ((this?(this.log||this._log):undefined)||console).debug(...args)
         }
     }
@@ -273,7 +273,11 @@
         var _b=emitter._betterEvents
 
         var registeredFrom=args.find(arg=>args instanceof Error)||new Error('Registered from');
-
+        if(globalObj.BetterLog)
+            registeredFrom=globalObj.BetterLog.discardLinesBetweenMarkers(registeredFrom,firstLine,lastLine)
+        else
+            registeredFrom.stack
+        
         Object.defineProperties(this,{
             //For legacy we keep the single character props as getters
             i:{get:()=>this.index,set:(val)=>this.index=val}
@@ -287,7 +291,7 @@
             ,event:{get:()=>this.evt,set:(val)=>this.evt=val}
 
             ,emitter:{writable:true, value:emitter}
-            ,registeredFrom:{value:globalObj.BetterLog?globalObj.BetterLog.filterLinesOutsideFile(registeredFrom,firstLine,lastLine):registeredFrom.stack}
+            ,registeredFrom:{value:registeredFrom}
         })
 
 
