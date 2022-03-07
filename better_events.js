@@ -42,22 +42,24 @@
     * Error logger
     */
     function logerror(...args){
-        ((this?(this.log||this._log):undefined)||console).error(...args)
+        if(this){
+            let log=this.log||this._log
+            if(log && typeof log.error=='function'){
+                log.error(...args);
+                return;
+            }
+            if(this._betterEvents){
+                console.warn("No log set on event emitter created @",this._betterEvents.createdAt);
+            }else{
+                console.warn("BetterEvents error handler called with this set to:",this);
+            }
+        }
+        console.error(...args);
     }
 
-
-    /*
-    * Error handler that won't fail
-    */
-    function handleEmitError(...args){
-        try{
-            if(this && typeof this.onerror=='function')
-                this.onerror(...args);
-            else
-                logerror.call(this,...args);
-        }catch(err){
-            console.error('BUGBUG. Bad error handler in BetterEvents instance.',err);
-        }
+    function replaceStack(targetErr,stackSrc){
+        targetErr.stack=targetErr.toString()+stackSrc.stack.replace(stackSrc.toString,'')
+        return targetErr;
     }
 
 
@@ -96,20 +98,22 @@
             ,intercept:{}
             ,options:parseOptions(options)
             ,running:{}
+            ,createdAt:(new Error('a')).stack.split('\n').slice(2)[0].trim().replace(/^at\s+/,"")
         }});
 
         //Set a possible error handler directly on this (but non-enum)
-        if(this._betterEvents.options.onerror)
-            Object.defineProperty(this,'onerror',{writable:true,configurable:true,value:this._betterEvents.options.onerror})
+        let errorHandler=this._betterEvents.options.onerror ?? logerror
+        Object.defineProperty(this._betterEvents,'onerror',{configurable:true,value:(...args)=>{
+            try{
+                errorHandler.call(this,...args);
+            }catch(e){
+                console.error('BUGBUG. Bad error handler in BetterEvents instance.',err);
+            }
+        }})
+        
         
         this.removeAllListeners(); //resets/sets default values of additional properties on this._betterEvents
     }
-
-    /*
-    * This method can be changed to another function to set the default value
-    * for each instance subsequently created.
-    */
-    BetterEvents.prototype.onerror=null;
 
 
   
@@ -272,11 +276,15 @@
     function Listener(args, emitter){
         var _b=emitter._betterEvents
 
-        var registeredFrom=args.find(arg=>args instanceof Error)||new Error('Registered from');
-        if(globalObj.BetterLog)
-            registeredFrom=globalObj.BetterLog.discardLinesBetweenMarkers(registeredFrom,firstLine,lastLine)
-        else
-            registeredFrom.stack
+        
+        let stack=(args.find(arg=>args instanceof Error)||new Error('Registered from')).stack;
+        if(globalObj.BetterLog){
+            stack=globalObj.BetterLog.discardLinesBetweenMarkers(stack,firstLine,lastLine);
+        }else{
+            let str="at BetterEvents.";
+            stack=stack.split("\n").slice(2).map(line=>line.trim()).filter(line=>line&&!line.startsWith(str));
+        }
+
         
         Object.defineProperties(this,{
             //For legacy we keep the single character props as getters
@@ -291,7 +299,7 @@
             ,event:{get:()=>this.evt,set:(val)=>this.evt=val}
 
             ,emitter:{writable:true, value:emitter}
-            ,registeredFrom:{value:registeredFrom}
+            ,createdAt:{value:stack[0]}
         })
 
 
@@ -416,15 +424,23 @@
         * @return Promise(void,n/a);
         */
         this.executeAfter=(emittedEvt)=>{
-            //First wait in case the event is still running, then run it, ignoring any returned value or error
-            var calledWith,listener=this,emittedFrom=new Error("executeAfter called from:");
-            return Promise.resolve(emitter._betterEvents.running[emittedEvt].slice(-1))
+            //Get possible pending promise for a currently running event
+            let running=emitter._betterEvents.running[emittedEvt];
+            if(running)
+                running=running.slice(-1);
+
+            let args;
+            let listenerEventFailed=new Error(`Listener executed after ${emittedEvt} failed.`);
+            
+            return Promise.resolve(running)
                 .then(()=>{
-                    calledWith=emitter._betterEvents.emitted[emittedEvt];
-                    this.execute(_getEmitAs.call(emitter),calledWith,emittedEvt)
+                    //get the args the emitted last
+                    args=emitter._betterEvents.emitted[emittedEvt];
+
+                    this.execute(_getEmitAs.call(emitter),args,emittedEvt)
                 })
-                .catch(function executeAfterFailed(err){
-                    handleEmitError.call(emitter,'Listener failed.',{listener,calledWith,emittedFrom},err)
+                .catch((err)=>{
+                    emitter._betterEvents.onerror(listenerEventFailed,{listener:this,args:makeArgs(args)},err);
                 })
             ;
         }
@@ -432,7 +448,10 @@
 
     }
 
-
+    Listener.prototype.toString=function(){
+        let created=this.createdAt.split("\n")[0].trim().replace(/^at\s+/,'');
+        return `<Listener event:${this.evt} registered:${created}>`;
+    }
 
     /*
     * Add a callback for a specific event, or using regexp for an unspecified number of possible events.
@@ -672,7 +691,7 @@
         //                      comes from the forEach()
         var cancelled=false
             ,compound={fired:{},remaining:events.slice(0),cancel:()=>cancelled=true}
-            ,errOnFail=new Error(`Listener for compound event '${cEvt}' failed. (Note: this stack shows where the compound event was registered)`)
+            ,listenerEventFailed=new Error(`A listener for compound event '${cEvt}' failed.`)
             ,self=this
         ;
         events.forEach(evt=>this.after(evt,'once',function executeCompoundEvent(...args){
@@ -691,7 +710,7 @@
                 if(!compound.remaining.length){
                     //...if it has, that means all events have fired and we can now call the passed in listener
                     logdebug.call(self,`Running compound event '${cEvt}' now with:`,compound.fired)
-                    self.emitEvent(cEvt,[compound.fired],undefined,errOnFail);
+                    self.emitEvent(cEvt,[compound.fired],undefined,listenerEventFailed);
                 }else{
                     logdebug.call(self,`'${evt}' just ran, but compound event '${cEvt}' is still waiting on: ${compound.remaining.sort()}`)
                 }
@@ -1340,8 +1359,7 @@
                 if(typeof options.emitAs=='object'){
                     return options.emitAs;
                 }else{
-                    handleEmitError.call(this,"Bad option .emitAs: ("+typeof options.emitAs+")"+String(options.emitAs));
-                    return globalObj;
+                    throw new Error("Bad option .emitAs: ("+typeof options.emitAs+")"+String(options.emitAs))
                 }
         }
     }
@@ -1366,6 +1384,8 @@
         return _makeArgs.apply(this,args);
     }
     function _makeArgs(){return arguments;}
+
+
 
 
     /**
@@ -1395,7 +1415,7 @@
     * @return-if object $options.returnStatus==true   @see _getStatusObj(). The above described array is set as prop .results, and the
     *                                                 promise as .promise
     */
-    BetterEvents.prototype.emitEvent = function(evt, args=undefined, options=undefined,errOnFail=undefined) {
+    BetterEvents.prototype.emitEvent = function(evt, args=undefined, options=undefined,listenerEventFailed=undefined) {
         //Only allow string events. For emitting all events that match a regexp, use emitEvents()
         if(typeof evt!='string')
             throw new TypeError(errString(1,'s_evt',evt));
@@ -1428,7 +1448,7 @@
         if(!status.intercepted){
 
             //REMEMBER: everything in this block is async
-            errOnFail=errOnFail instanceof Error?errOnFail:new Error(`Listener for event '${evt}' failed.`);
+            listenerEventFailed=listenerEventFailed ?? new Error(`A listener for event '${evt}' failed.`);
             var _b=this._betterEvents, self=this;
             status.promise=new Promise(async function emitEvent_runListenersAsync(resolve){
                 try{
@@ -1451,9 +1471,11 @@
 
                             //Sanity check
                             if(!(listener instanceof Listener)){
-                                let err=handleEmitError.call(self,`EINVAL: BetterEvents.emitEvent('${evt}',...) expects all listeners to be instances of `
-                                    +'BetterEvents.Listener, this one was not:',listener,options);
-                                status.results.push([false,err||'BetterEvents.emitEvent() got invalid listener function',g,j]);
+                                let t=typeof listener;
+                                let err=replaceStack(new Error(`BUGBUG: A ${t} (not an instance of BetterEvents.Listener) was registered `
+                                    +`as a listener for '${evt}'`),listenerEventFailed);
+                                console.error(err,listener);
+                                status.results.push([false,err,g,j]);
                                 //after this it jumps down and gets status finished...
                             }else{
                                 try{
@@ -1466,7 +1488,7 @@
                                     status.results.push([true,res,g,j]);
                                 }catch(err){
                                     // logdebug.call(this,err);
-                                    handleEmitError.call(self,errOnFail,err,listener,makeArgs(args));
+                                    self._betterEvents.onerror(listenerEventFailed,{listener,args:makeArgs(args),options},err);
                                     status.results.push([false,err,g,j]);
                                 }
                             }
@@ -1486,7 +1508,10 @@
                                 let timeout=new Promise((nada,expireGroup)=>{setTimeout(expireGroup,options.groupTimeout)})
                                 await Promise.all([groupedPromises,timeout])
                             }catch(err){
-                                handleEmitError.call(self,`Group ${g} timed out, triggering next group...`);
+                                self._betterEvents.onerror(replaceStack(
+                                    new Error(`Group ${g} for event '${evt}' timed out, triggering next group...`)
+                                    ,listenerEventFailed
+                                ));
                             }
                         }else{
                             await groupedPromises;
@@ -1536,14 +1561,14 @@
         if(!regexp instanceof RegExp)
             throw new TypeError(errString(1,'r_evt',evt));
        
-        var self=this,errOnFail=new Error(`Listener matching regexp event '${regexp}' failed.`);
+        var self=this,listenerEventFailed=new Error(`A listener matching regexp event '${regexp}' failed.`);
         return new Promise(function _emitEvents(resolve){
 
             var events=self.getEvents(regexp);
 
             var results={},promises=[];
             for(let evt of events){
-                let obj=self.emitEvent(evt,args,options,errOnFail);
+                let obj=self.emitEvent(evt,args,options,listenerEventFailed);
                 let promise=obj.promise||obj;//since we don't know if options.returnStatus==true
                 promises.push(promise.then(result=>{results[evt]=result}));
             }
@@ -1551,7 +1576,7 @@
             Promise.all(promises).then(()=>resolve(results));
 
         }).catch(err=>{
-            handleEmitError.call(self,'BUGBUG BetterEvents.emitEvents():',err);
+            console.error('BUGBUG BetterEvents.emitEvents():',err);
         })
 
     }
