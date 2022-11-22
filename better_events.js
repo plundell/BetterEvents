@@ -1056,14 +1056,38 @@
     * @return bool            
     */
     BetterEvents.prototype.hasListener = function hasListener(evtOrListner,callback) {
-        if(evtOrListner && evtOrListner.evt){
-            var evt=evtOrListner.evt;
-            callback=evtOrListner.listener;
-        }else{
-            evt=evtOrListner;
+        var t=typeof evtOrListner;
+        var nameOrRegex;
+        switch(t){
+            case 'string':
+                nameOrRegex=evtOrListner;
+                break;
+            case 'object':
+                if(evtOrListner instanceof RegExp){
+                    nameOrRegex=evtOrListner;
+                }else{
+                    nameOrRegex=evtOrListner.evt;
+                    callback=evtOrListner.listener;
+                }
+                break;
+            default:
+                throw new TypeError("Expected arg#1 to be a string event name, or an object with prop .evt, got a "+t);
+        }
+        t=typeof callback;
+        var check;
+        switch(t){
+            case 'string':
+                check=listener=>listener.callback.name==callback;
+                break;
+            case 'function':
+                check=listener=>listener.callback==callback;
+                break;
+            default:
+                throw new TypeError("Expected arg#2 to be a string function name or callable function, got a "+t);
+
         }
 
-        return this.getListeners(evt,true).find(listener=>listener.callback==callback) ? true : false;
+        return this.getListeners(nameOrRegex,true).find(check) ? true : false;
     }
 
 
