@@ -12,6 +12,10 @@
  */
 (function(globalObj){
     var firstLine=new Error("First line marker")
+
+    //Make <Listener> class available on exported constructor function
+    BetterEvents.Listener=Listener; 
+
     //Export from module if available
     if(typeof module === 'object' && module.exports){
         module.exports = BetterEvents;
@@ -26,6 +30,16 @@
         var development=process.env.NODE_ENV=='development';
     }
     
+
+
+
+
+
+
+
+
+
+
    
     /*
     * Verbose logger that respects possible devmode
@@ -62,7 +76,11 @@
         return targetErr;
     }
 
-
+    /**
+     * Default options. Used by parseOptions() when creating a new EventEmitter and when emitting an event (with one-time options)
+     * 
+     * NOTE: additional checks are done for these and other options in parseOptions()
+     */
     BetterEvents.defaultOptions={
         groupTimeout:0 
         ,groupDelay:0 //the amount of time to wait before executing the next group (which can allow things to propogate if need be)
@@ -72,8 +90,19 @@
         ,duplicate:false   //true=>allow the same listener to be added multiple times. default false
         ,returnStatus:true //Default true => emitEvent() will return an object (@see _getStatusObj()), else a promise
     }
+    const defaultOptionTypes={
+        'groupTimeout':'number'
+        ,'groupDelay':'number'
+        ,'onProgress':'function'
+        ,'listeners':'object'
+        ,'returnStatus':'boolean'
+        ,'onerror':'function'
+    }
 
-    BetterEvents.Listener=Listener;
+
+
+
+
 
     function BetterEvents(options={}){
 
@@ -114,7 +143,6 @@
         
         this.removeAllListeners(); //resets/sets default values of additional properties on this._betterEvents
     }
-
 
   
 
@@ -196,6 +224,8 @@
     * Parse options passed to a new instance, only keeping those we expected and only throwing if those are
     * the wrong type
     *
+    * NOTE: used for both 
+    *
     * @param object dirty   dirty options
     * @opt object onetime   one time options
     *
@@ -207,20 +237,13 @@
         dirty=Object.assign({},dirty,onetime);
         var parsed=Object.assign({},BetterEvents.defaultOptions);
     
-        var types={
-            'groupTimeout':'number'
-            ,'groupDelay':'number'
-            ,'onProgress':'function'
-            ,'listeners':'object'
-            ,'returnStatus':'boolean'
-            ,'onerror':'function'
-        }
-        for(let key in types){
+        
+        for(let key in defaultOptionTypes){
             if(dirty.hasOwnProperty(key)){
-                if(typeof dirty[key]==types[key] && dirty[key]!=null)
+                if(typeof dirty[key]==defaultOptionTypes[key] && dirty[key]!=null)
                     parsed[key]=dirty[key];
                 else
-                    throw new TypeError(`Option '${key}' should be a ${types[key]}, got: ${typeString(dirty[key])}`)
+                    throw new TypeError(`Option '${key}' should be a ${defaultOptionTypes[key]}, got: ${typeString(dirty[key])}`)
             }
         }
 
@@ -259,25 +282,61 @@
         return parsed;
     }
 
-    /*
+
+
+
+
+    /**
+    * Add a listener to an event. 
+    * 
+    * @params ...any args        @see Listener() parsing of args
+    *
+    * NOTE 1: Duplicate callbacks for the same event CAN be added, but .emitEvent() will only 
+    *         call the first occurence of each callback unless option.duplicate is truthy
+    * 
+    * NOTE 2: Callbacks that return promises that never resolve can prevent other listeners 
+    *         for the same event from running
+    *
+    * @throw TypeError
+    * @return <Listener>        
+    */
+    BetterEvents.prototype.addListener=function(...args) {
+        //Create the <Listener>
+        var listener=new Listener(args,this);
+
+        //Add it to the appropriate place        
+        if(typeof listener.evt=='string'){
+            (this._betterEvents.events[listener.evt]||(this._betterEvents.events[listener.evt]=[])).push(listener);
+        }else{
+           this._betterEvents.regexp.push(listener);
+        }
+
+        return listener;
+    };
+
+
+
+
+
+    /**
     * @constructor Listener     These are the objects waiting for events to be emitted
     *
-    * @param array args             Array of args
-    *   @param string|<RegExp> evt    
-    *   @param function listener      Method to be called when the event is emitted. If the method returns 'off' on
-    *                                   any call then it will be removed after that call
-    *   @opt boolean|string once      Boolean or string 'once'. The listener will be removed after the first time it's called.  
-    *                                   ProTip: is to use string 'once' so it's clear what we're doing...
-    *   @opt number|string index      The order in which to run the listener. All listeners with same index run
-    *                                   concurrently. Lower numbers run sooner. Use one or multiple '+'/'-' to run in relation
-    *                                   to options.defaultIndex
+    * @param array args         Array of args
+    *   @arg string|<RegExp> evt      The event to listen for
+    *   @arg function listener        Callback to call when $event is emitted. If/when it returns 'off' it will be removed from event
+    *   @arg boolean|string once      Boolean or string 'once'. The listener will be removed after the first call.  
+    *   @arg number|string index      The order in which to run the listener. (sometimes called 'group' in this file):
+    *                                   - Lower numbers run sooner. 
+    *                                   - All listeners with same index run concurrently. 
+    *                                   - Use one or multiple '+'/'-' to run in relation to options.defaultIndex
     * @param <BetterEvents> emitter 
     */
     function Listener(args, emitter){
-        var _b=emitter._betterEvents
+        //Get the hidden prop from the parent emitter
+        const _b=emitter._betterEvents
 
         
-        let stack=(args.find(arg=>args instanceof Error)||new Error('Registered from')).stack;
+        var stack=(args.find(arg=>args instanceof Error)||new Error('Registered from')).stack;
         if(globalObj.BetterLog){
             stack=globalObj.BetterLog.discardLinesBetweenMarkers(stack,firstLine,lastLine);
         }else{
@@ -286,6 +345,7 @@
         }
 
         
+
         Object.defineProperties(this,{
             //For legacy we keep the single character props as getters
             i:{get:()=>this.index,set:(val)=>this.index=val}
@@ -294,19 +354,21 @@
             ,e:{get:()=>this.evt,set:(val)=>this.evt=val}
             ,n:{get:()=>this.runs,set:(val)=>this.runs=val}
             
-            //Some synomyms for ease
+            //Some synomyms for ease and clarity
             ,listener:{get:()=>this.callback,set:(val)=>this.callback=val}
             ,event:{get:()=>this.evt,set:(val)=>this.evt=val}
+            ,group:{get:()=>this.index}
 
             ,emitter:{writable:true, value:emitter}
             ,createdAt:{value:stack[0]}
         })
 
 
-        
-        this.once=false;
         this.index=_b.options.defaultIndex
+        this.once=false;
         this.runs=0;
+
+        
 
         //First just assign without checking....
         if(args.length==1 && args[0] && typeof args[0]=='object'){
@@ -437,7 +499,7 @@
                     //get the args the emitted last
                     args=emitter._betterEvents.emitted[emittedEvt];
 
-                    this.execute(_getEmitAs.call(emitter),args,emittedEvt)
+                    this.execute(_getEmitAs.call(emitter),args,emittedEvt);
                 })
                 .catch((err)=>{
                     emitter._betterEvents.onerror(listenerEventFailed,{listener:this,args:makeArgs(args)},err);
@@ -453,48 +515,42 @@
         return `<Listener event:${this.evt} registered:${created}>`;
     }
 
-    /*
-    * Add a callback for a specific event, or using regexp for an unspecified number of possible events.
-    *
-    * NOTE: Duplicate callbacks for the same event CAN be added, but .emitEvent() will only call the first occurence of each callback
-    *       unless option.duplicate is truthy
-    * NOTE2:Callbacks that return promises that never resolve can prevent other listeners for the same event from running
-    *
-    *
-    *
-    * @throw TypeError
-    * @return <Listener>        
-    */
-    BetterEvents.prototype.addListener=function(...args) {
-        //Create the <Listener>
-        var listener=new Listener(args,this);
 
-        //Add it to the appropriate place        
-        if(typeof listener.evt=='string'){
-            (this._betterEvents.events[listener.evt]||(this._betterEvents.events[listener.evt]=[])).push(listener);
-        }else{
-           this._betterEvents.regexp.push(listener);
-        }
 
-        return listener;
-    };
 
-    /*
-    * @shortcut addListener
+
+
+    // palun 2022-11-22: probably don't include this so we mark that we're different than eg. html elements
+    // /**
+    // * @alias   addEventListener => addListener
+    // */
+    // BetterEvents.prototype.addEventListener=BetterEvents.prototype.addListener
+
+
+    /**
+    * Alias for addListener, but without possibility of additional args
+    * 
+    * @param string evt
+    * @param function listener
+    * 
     * @return <Listener>       
     */
     BetterEvents.prototype.on=function(evt,listener){
-        return this.addListener(evt,listener,false);
+        return this.addListener(evt,listener);
     }
 
-    /*
-    * @shortcut addListener
+
+    /**
+    * Add a listener which is only run once
+    * 
+    * @param string evt
+    * @param function listener
+    * 
     * @return <Listener>      
     */
     BetterEvents.prototype.once=function(evt,listener){
         return this.addListener(evt,listener,true); //true=>once
     }
-
 
 
     /*
@@ -522,6 +578,7 @@
 
         return;
     }
+
 
     /*
     * Add a listener for all events without preventing listener set by this.onUnhandled().
@@ -668,6 +725,7 @@
     }
 
 
+
     /*
     * Create an event that fires once after a list of other events. 
     *
@@ -695,7 +753,6 @@
             ,self=this
         ;
         events.forEach(evt=>this.after(evt,'once',function executeCompoundEvent(...args){
-              //DevNote: Any error emitted here will show .emittedFrom as an empty event
             try{
                 if(cancelled)
                     return;
@@ -1404,7 +1461,7 @@
     *                                                           need to pass true here)
     *                                listeners - array          The results from this.getListenersForEmit(). Emit the event to these 
     *                                                           listeners INSTEAD OF calling getListenersForEmit() now.
-    * @opt <Error> emittedFrom   An error used if the listener failed (good since it's stack can reflect something more telling...)
+    * @opt <Error> listenerEventFailed   An error used if the listener failed (good since it's stack can reflect something more telling...)
     *
     * @throws TypeError
     * @return Promise(array[array,...],void)    Resolves when all listeners have finished with an array of arrays. Each child array
