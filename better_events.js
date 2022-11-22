@@ -646,6 +646,38 @@
         }
     }
 
+
+    /*
+    * If an event hasn't been emitted, run a callback, optionally first waiting
+    *
+    * @param string evt     Event to look for, see this.alreadyEmitted()
+    * @param function cb    Function to run if event hasn't been emitted
+    * @param number wait    If omitted the check will happen syncronously
+    *
+    * @return function      Function to cancel timeout.
+    */
+    BetterEvents.prototype.ifNotEmitted=function(evt,cb,wait){
+        var _ifNotEmitted=()=>{
+            if(!this.alreadyEmitted(evt)){
+                try{
+                    let p=cb.call(this);
+                    if(p instanceof Promise)
+                        p.catch(this._betterEvents.onerror)
+                }catch(e){
+                    this._betterEvents.onerror(e)
+                }
+            }
+        }
+        var id;
+        if(wait==undefined){
+            _ifNotEmitted();
+        }else{
+            id=setTimeout(_ifNotEmitted,wait);
+        }
+        return ()=>{cancelTimeout(id);}
+    }
+
+
     /*
     * Remove stored emitted events. This will affect emitOnce(), alreadyEmitted() and after()
     *
