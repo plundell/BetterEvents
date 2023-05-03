@@ -1,4 +1,4 @@
-*.sublime-project
-dist/
 node_modules/
-tests/
+dist/
+*.log
+*.sublime-project
