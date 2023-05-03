@@ -1,1 +1,4 @@
-test/
+*.sublime-project
+dist/
+node_modules/
+tests/
