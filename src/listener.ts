@@ -1,217 +1,208 @@
-
 import { BetterEvents } from "./better_events";
+import { makeArgs } from "./helper";
+import { Options } from "./options";
+import * as t from "./types";
 
-
-export type ListenerFunction = (...args: any) => void
+const no_callback_set: t.VoidFunction = () => {};
+const no_evt_set = new RegExp("manthatitalianfamilyatthenexttablesurearequite");
 /**
-* @constructor Listener     These are the objects waiting for events to be emitted
+* @class Listener These are the objects waiting for events to be emitted
 *
-* @param array args         Array of args
-*   @arg string|<RegExp> evt      The event to listen for
-*   @arg function listener        Callback to call when $event is emitted. If/when it returns 'off' it will be removed from event
-*   @arg boolean|string once      Boolean or string 'once'. The listener will be removed after the first call.  
-*   @arg number|string index      The order in which to run the listener. (sometimes called 'group' in this file):
-*                                   - Lower numbers run sooner. 
-*                                   - All listeners with same index run concurrently. 
-*                                   - Use one or multiple '+'/'-' to run in relation to options.defaultIndex
-* @param <BetterEvents> emitter 
 */
 export class Listener {
-	public index: number;
-	public once: boolean;
-	public callback: ListenerFunction;
-	public evt: string | RegExp;
-	public runs: number;
-
-	constructor(args, emitter: BetterEvents) {
-
-		//Get the hidden prop from the parent emitter
-		const _b = emitter._betterEvents;
-
-		let stack = (args.find((arg: any) => arg instanceof Error) || new Error('Registered from')).stack;
-		const str = "at BetterEvents.";
-		stack = stack.split("\n").slice(2).map(line => line.trim()).filter(line => line && !line.startsWith(str));
-
-		this.index = _b.options.defaultIndex;
-		this.once = false;
-		this.runs = 0;
-
-		Object.defineProperties(this, {
-			//For legacy we keep the single character props as getters
-			i: { get: () => this.index, set: (val) => this.index = val }
-			, o: { get: () => this.once, set: (val) => this.once = val }
-			, l: { get: () => this.callback, set: (val) => this.callback = val }
-			, e: { get: () => this.evt, set: (val) => this.evt = val }
-			, n: { get: () => this.runs, set: (val) => this.runs = val }
-
-			//Some synomyms for ease and clarity
-			, listener: { get: () => this.callback, set: (val) => this.callback = val }
-			, event: { get: () => this.evt, set: (val) => this.evt = val }
-			, group: { get: () => this.index }
-
-			, emitter: { writable: true, value: emitter }
-			, createdAt: { value: stack[0] }
-		});
-		
-
-		//First just assign without checking....
-		if (args.length == 1 && args[0] && typeof args[0] == 'object') {
-			//A single object with named props can be passed in...
-			Object.assign(this, args[0]);
-
-		} else { 
-
-			//Allow args in any order
-			args.forEach((arg, i) => {
-				switch (typeof arg) {
-					case 'function': this.callback = arg; break; //listener
-					case 'boolean': this.once = arg; break; //once
-					case 'number': this.index = arg; break; //index to run
-					case 'string': 
-						if (arg.match(/^\++$/) && this.index == _b.options.defaultIndex) { //first match => change index, second match =>fall through to this.evt='+'
-							this.index = _b.options.defaultIndex + arg.length; //increment index up
-						} else if (arg.match(/^-+$/) && this.index == _b.options.defaultIndex) { //first match => change index, second match =>fall through to this.evt='-'
-							this.index = _b.options.defaultIndex - arg.length; //increment index down
-						} else if (arg == 'once' && this.once == false) {
-							this.once = true;
-						} else if (!this.evt) {
-							this.evt = arg; //event name
-						} else {
-							throw new Error(`EINVAL. Too many string args passed. Failed on arg #${i} of: ${JSON.stringify(args)}`);
-						}
-						break;
-					case 'object':
-						if (arg instanceof RegExp)
-							this.evt = arg;
-						else
-							throw new Error(`EINVAL. Unexpected object arg #${i}. Only event <RegExp> or single object matching return of this method allowed: `
-								+ JSON.stringify(this));
-				}
-			});
-		}
-
-		//Then check...
-		if (typeof this.callback != 'function')
-			throw new TypeError("No listener function passed, got: " + JSON.stringify(this));
-		if (typeof this.evt != 'string' && !(this.evt instanceof RegExp))
-			throw new TypeError("No event string or RegExp was passed, got: " + JSON.stringify(this));
+	#index: number;
+	set index(x: t.PlusMinusIndex) {
+		if (typeof x == "number")
+			this.#index = x;
+		else if (t.isPlusOrMinusString(x))
+			this.#index += (x.length * (x.startsWith("+") ? 1 : -1));
 	}
 
+	get index(): number { return this.#index; }
 
-	//Finally, add a method that can always be used to remove this listener from this object...
+	#once: boolean = false;
+	set once(x: t.onceArg) { if (t.isOnceArg(x)) this.#once = x == true; } // x can be false|true|'once', so this check works
+	get once(): boolean { return this.#once; }
+
+	#callback: t.ListenerFunction = no_callback_set;
+	set callback(x: t.ListenerFunction) {
+		if (typeof x != "function")
+			throw new TypeError("Expected a function, got: " + JSON.stringify(x));
+		else if (this.#callback != no_callback_set)
+			throw new TypeError("Cannot reassign Listener.callback");
+		else
+			this.#callback = x;
+	}
+
+	get callback(): t.ListenerFunction { return this.#callback; }
+
+	#evt: t.EventPattern = no_evt_set;
+	set evt(x: t.EventPattern) {
+		if (typeof x != "string" && !(x instanceof RegExp))
+			throw new TypeError("Listner.evt should be a string or RegExp, got: " + JSON.stringify(x));
+		else if (this.#evt != no_evt_set)
+			throw new TypeError("Cannot reassign Listener.evt");
+		else
+			this.#evt = x;
+	}
+
+	get evt() { return this.#evt; }
+
+	#createdAt: string;
+	get createdAt(): string { return this.#createdAt; }
+
+	#emitter: BetterEvents;
+	get emitter(): BetterEvents { return this.#emitter; }
+
+	#runs: number = 0;
+	get runs(): number { return this.#runs; }
+
+	/**
+	 * Shortcut to the options on the parent emitter
+	 */
+	get #options():	Options { return this.#emitter._betterEvents.options; }
+
+	/**
+	 * @param args         		Array of args
+	 * @param emitter
+	*/
+	constructor(args: t.ListenerArgsObj, emitter: BetterEvents);
+	constructor(args: t.ListenerArgsArray, emitter: BetterEvents);
+	constructor(args: t.ListenerArgsObj | t.ListenerArgsArray, emitter: BetterEvents) {
+		if (!args || typeof args != "object")
+			throw new TypeError("Expected arg #1 to be an array of ordered args or an object of named args, got: " + JSON.stringify(args));
+		if (!(emitter instanceof BetterEvents))
+			throw new TypeError("Expected arg #2 to be an instance of BetterEvents, got: " + JSON.stringify(emitter));
+
+		// Set defaults for values which couldn't be specified statically for class
+		this.#index = this.#options.defaultIndex;
+		this.#emitter = emitter;
+		this.#createdAt = (new Error())?.stack?.split("\n").slice(2)[0].trim().replace(/^at\s+/, "") || "unknown";
+
+		// Assign the passed in args, letting the setters validate and throw if need be
+		if (Array.isArray(args)) {
+			// The first two are required and should be in order. We don't have to check if they've been set like
+			// the case with the object below since the setters will throw
+			this.#evt = args[0];
+			this.#callback = args[1];
+
+			// ...whereas the optional
+			for (let i = 2; i < 4; i++) {
+				if (t.isOnceArg(args[i]))
+					this.once = args[i] == true;
+				else if (t.isIndexArg(args[i])) {
+
+				}
+			}
+		}
+		else {
+			// This implies an object, so just assign...
+			Object.assign(this, args);
+
+			// ...however we can't know that our two required have been set, so check
+			if (this.#callback == no_callback_set)
+				throw new Error("Missing required arg 'callback'. Cannot create Listener.");
+
+			if (this.#evt == no_evt_set)
+				throw new Error("Missing required arg 'evt'. Cannot create Listener.");
+		}
+		// A single object with named props can be passed in...
+	}
+
+	// Finally, add a method that can always be used to remove this listener from this object...
 	remove() {
 		try {
-			emitter.removeListener(this.callback, this.evt);
+			this.emitter.removeListener(this.callback, this.evt);
 			return true;
-		} catch (e) {
-			return false; //the listener had previously been removed
+		}
+		catch (e) {
+			return false; // the listener had previously been removed
 		}
 	}
 
-	//...and one that can be used to add a timeout that fires if the event hasn't fired within that timespan
+	// ...and one that can be used to add a timeout that fires if the event hasn't fired within that timespan
 	timeout(callback, timeout, cancelOnTimeout) {
-		const n0 = this.runs; //run times when timeout is registered...
+		const n0 = this.runs; // run times when timeout is registered...
 		return setTimeout(() => {
-			//...compared to run times on timeout
+			// ...compared to run times on timeout
 			if (this.runs == n0) {
 				if (cancelOnTimeout)
 					this.remove();
-				callback.call(emitter);
+				callback.call(this.emitter);
 			}
 		}, timeout);
 	}
 
-	        
-	/*
+	/**
 	* Execute (.apply) the callback
 	*
-	* @param object callAs
-	* @param array args
-	* @opt string evt       The event that caused this to run. only relevant if this.evt is regexp
+	* @param callAs
+	* @param args
+	* @param evt       The event that caused this to run. only relevant if this.evt is regexp
 	*
-	* @return Promise(result,error)       
-	*/        
-	execute(callAs, args, evt) {
+	* @return Promise(result,error)
+	*/
+	execute(callAs: object, args: any[], evt?: string) {
 		return new Promise((resolve, reject) => {
-			//Make sure that the callback runs async (allowing any sync calls after it to run first)
-			setTimeout((async function _execute() { 
-				try { 
-					//Increment counter
-					this.runs++;
+			// Make sure that the callback runs async (allowing any sync calls after it to run first)
+			setTimeout(async () => {
+				try {
+					// Increment counter
+					this.#runs++;
 
-					//Remove from emitter BEFORE since the callback may emit the event again
+					// Remove from emitter BEFORE since the callback may emit the event again
 					if (this.once)
 						this.remove();
 
-					//If our .evt is a RegExp, and a specific event is used to apply (ie. the regular behaviour of emitEvent()),
-					//prepend that event to the args
-					if (typeof this.evt != 'string' && typeof evt == 'string')
-						args = [evt].concat(args);                     
+					// If our .evt is a RegExp, and a specific event is used to apply (ie. the regular behaviour of emitEvent()),
+					// prepend that event to the args
+					if (typeof this.evt != "string" && typeof evt == "string")
+						args = [evt].concat(args);
 
-					//Now run the callback which may return a value or a promise...
+					// Now run the callback which may return a value or a promise...
 					const result = await this.callback.apply(callAs, args);
 
-					//The return value may be reason to remove it...
-					if (result == 'off')
+					// The return value may be reason to remove it...
+					if (result == "off")
 						this.remove();
-					//^DevNote: the 'off' is meant for here, but we pass it on anyway for potential logging purposes
+					// ^DevNote: the 'off' is meant for here, but we pass it on anyway for potential logging purposes
 
-					//Finally we return what may be a promise or may be a value
+					// Finally we return what may be a promise or may be a value
 					return resolve(result);
-
-				} catch (err) {
+				}
+				catch (err) {
 					reject(err);
 				}
-			}).bind(this), 0);
+			}, 0);
 		});
 	}
-
 
 	/*
 	* @param string emittedEvt
 	* @return Promise(void,n/a);
 	*/
-	executeAfter(emittedEvt) {
-		//Get possible pending promise for a currently running event
-		let running = emitter._betterEvents.running[emittedEvt];
-		if (running)
-			running = running.slice(-1);
-
-		let args;
+	async executeAfter(callAs: object, emittedEvt: string) {
+		var args;
 		const listenerEventFailed = new Error(`Listener executed after ${emittedEvt} failed.`);
-	            
-		return Promise.resolve(running)
-			.then(() => {
-				//get the args the emitted last
-				args = emitter._betterEvents.emitted[emittedEvt];
+		try {
+			// Get possible pending promise for a currently running event
+			let running = this.emitter._betterEvents.running[emittedEvt];
+			if (running) {
+				await running.slice(-1);
+			}
 
-				this.execute(_getEmitAs.call(emitter), args, emittedEvt);
-			})
-			.catch((err) => {
-				emitter._betterEvents.onerror(listenerEventFailed, { listener: this, args: makeArgs(args) }, err);
-			})
-			;
+			// get the args the emitted last
+			args = this.emitter._betterEvents.emitted[emittedEvt];
+
+			this.execute(callAs, args, emittedEvt);
+		}
+		catch (e) {
+			this.emitter._betterEvents.onerror(listenerEventFailed, { listener: this, args: makeArgs(args) }, e);
+		}
 	}
-	
-
 
 	toString() {
-		const created = this.createdAt.split("\n")[0].trim().replace(/^at\s+/, '');
+		const created = this.createdAt.split("\n")[0].trim().replace(/^at\s+/, "");
 		return `<Listener event:${this.evt} registered:${created}>`;
 	}
-
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
