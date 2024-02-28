@@ -1158,37 +1158,7 @@ export class BetterEvents {
 
   
 
-   
-/*
-* Verbose logger that respects possible devmode
-*/
-function logdebug(...args) {
-	if (process && process?.env?.NODE_ENV == 'development')
-		((this ? (this.log || this._log) : undefined) || console).debug(...args);
-}
-function logwarn(...args) {
-	((this ? (this.log || this._log) : undefined) || console).warn(...args);
-}
-/*
-* Error logger
-*/
-function logerror(...args) {
-	if (this) {
-		const log = this.log || this._log;
-		if (log && typeof log.error == 'function') {
-			log.error(...args);
-			return;
 		}
-		if (this._betterEvents) {
-			console.warn("No log set on event emitter created @", this._betterEvents.createdAt);
-		} else {
-			console.warn("BetterEvents error handler called with this set to:", this);
 		}
 	}
-	console.error(...args);
-}
-
-function replaceStack(targetErr, stackSrc) {
-	targetErr.stack = targetErr.toString() + stackSrc.stack.replace(stackSrc.toString, '');
-	return targetErr;
 }
